@@ -51,4 +51,8 @@ class Preferences(context: Context) {
     var recoveryThresholdRssi: Int
         get() = prefs.getInt("recovery_threshold", -70)
         set(value) = prefs.edit().putInt("recovery_threshold", value).apply()
+
+    var isQuickTileAdded: Boolean
+        get() = prefs.getBoolean("quick_tile_added", false)
+        set(value) = prefs.edit().putBoolean("quick_tile_added", value).apply()
 }

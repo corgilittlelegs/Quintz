@@ -18,8 +18,10 @@ import com.quintz.wifi.model.BandType
 import com.quintz.wifi.model.ShizukuState
 import com.quintz.wifi.model.WifiStatus
 import com.quintz.wifi.service.TileService
+import com.quintz.wifi.service.TileStateTracker
 import com.quintz.wifi.service.WatchdogService
 import com.quintz.wifi.shizuku.ShizukuManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,6 +29,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -43,6 +46,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _watchdogActive = MutableStateFlow(prefs.isWatchdogEnabled)
     val watchdogActive: StateFlow<Boolean> = _watchdogActive.asStateFlow()
+
+    private val _isTileAdded = MutableStateFlow(prefs.isQuickTileAdded)
+    val isTileAdded: StateFlow<Boolean> = _isTileAdded.asStateFlow()
 
     private val connectivityManager = application.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
     private var pollingJob: Job? = null
@@ -82,6 +88,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } catch (e: Exception) {
             android.util.Log.e("MainVM", "Failed to register NetworkCallback", e)
         }
+
+        viewModelScope.launch {
+            TileStateTracker.tileAddedFlow.collect { added ->
+                _isTileAdded.value = added
+            }
+        }
+
+        checkTileStatus()
 
         viewModelScope.launch {
             shizukuState.collect { state ->
@@ -134,6 +148,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             controller.refreshStatus()
             controller.scanRadios()
+            checkTileStatus()
         }
     }
 
@@ -209,6 +224,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun getSavedPassword(ssid: String): String = prefs.getPassword(ssid).orEmpty()
 
+    fun checkTileStatus() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val isAdded = queryIsTileAdded()
+            withContext(Dispatchers.Main) {
+                _isTileAdded.value = isAdded
+            }
+        }
+    }
+
+    private fun queryIsTileAdded(): Boolean {
+        // 1. Query via Shizuku: inspect sysui_qs_tiles in secure settings
+        if (ShizukuManager.isReady()) {
+            try {
+                val res = ShizukuManager.exec("settings get secure sysui_qs_tiles")
+                if (res.isSuccess && res.stdout.isNotBlank()) {
+                    val added = res.stdout.contains("com.quintz.wifi/.service.TileService")
+                    prefs.isQuickTileAdded = added
+                    return added
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("MainVM", "Failed checking sysui_qs_tiles via Shizuku", e)
+            }
+        }
+
+        // 2. Direct read of Settings.Secure fallback
+        try {
+            val tiles = android.provider.Settings.Secure.getString(
+                getApplication<Application>().contentResolver,
+                "sysui_qs_tiles"
+            )
+            if (tiles != null) {
+                val added = tiles.contains("com.quintz.wifi/.service.TileService")
+                prefs.isQuickTileAdded = added
+                return added
+            }
+        } catch (_: Exception) {}
+
+        // 3. Fallback to cached preference
+        return prefs.isQuickTileAdded
+    }
+
     fun requestAddQuickTile() {
         val context = getApplication<Application>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -220,13 +276,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 context.mainExecutor
             ) { result ->
                 if (result == android.app.StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED) {
+                    _isTileAdded.value = true
+                    prefs.isQuickTileAdded = true
                     _message.value = "Quintz tile added to Quick Settings!"
                 } else if (result == android.app.StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ALREADY_ADDED) {
+                    _isTileAdded.value = true
+                    prefs.isQuickTileAdded = true
                     _message.value = "Tile is already in your Quick Settings panel"
                 }
             }
         } else {
             _message.value = "Swipe down twice and tap Edit (✎) to add Quintz tile"
+        }
+    }
+
+    fun removeQuickTile() {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (ShizukuManager.isReady()) {
+                val res = ShizukuManager.exec("settings get secure sysui_qs_tiles")
+                if (res.isSuccess) {
+                    val currentTiles = res.stdout.trim()
+                    val newTiles = currentTiles.split(",")
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() && !it.contains("com.quintz.wifi/.service.TileService") }
+                        .joinToString(",")
+                    val writeRes = ShizukuManager.exec("settings put secure sysui_qs_tiles '$newTiles'")
+                    if (writeRes.isSuccess) {
+                        prefs.isQuickTileAdded = false
+                        withContext(Dispatchers.Main) {
+                            _isTileAdded.value = false
+                            _message.value = "Quick Settings tile removed"
+                        }
+                        return@launch
+                    }
+                }
+            }
+            withContext(Dispatchers.Main) {
+                _message.value = "Swipe down twice and tap Edit (✎) to remove Quintz tile"
+            }
         }
     }
 }

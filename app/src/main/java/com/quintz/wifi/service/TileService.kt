@@ -26,8 +26,22 @@ class TileService : android.service.quicksettings.TileService() {
         prefs = Preferences(this)
     }
 
+    override fun onTileAdded() {
+        super.onTileAdded()
+        prefs.isQuickTileAdded = true
+        TileStateTracker.notifyTileState(true)
+    }
+
+    override fun onTileRemoved() {
+        super.onTileRemoved()
+        prefs.isQuickTileAdded = false
+        TileStateTracker.notifyTileState(false)
+    }
+
     override fun onStartListening() {
         super.onStartListening()
+        prefs.isQuickTileAdded = true
+        TileStateTracker.notifyTileState(true)
         updateTileState()
     }
 
@@ -66,7 +80,7 @@ class TileService : android.service.quicksettings.TileService() {
 
                 val password = prefs.getPassword(current.ssid)
 
-                if (current.isLockedToBssid && current.band == BandType.BAND_5_GHZ) {
+                if (current.isLockedToBssid && (current.band == BandType.BAND_5_GHZ || current.band == BandType.BAND_6_GHZ)) {
                     // Currently locked -> Unlock to Auto
                     withContext(Dispatchers.Main) {
                         tile.state = Tile.STATE_INACTIVE
@@ -149,7 +163,7 @@ class TileService : android.service.quicksettings.TileService() {
                 } else if (status == null || !status.isConnected) {
                     tile.state = Tile.STATE_INACTIVE
                     tile.subtitle = "Disconnected"
-                } else if (status.isLockedToBssid && status.band == BandType.BAND_5_GHZ) {
+                } else if (status.isLockedToBssid && (status.band == BandType.BAND_5_GHZ || status.band == BandType.BAND_6_GHZ)) {
                     tile.state = Tile.STATE_ACTIVE
                     tile.subtitle = "Locked (${status.frequency} MHz)"
                 } else {
