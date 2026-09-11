@@ -1,11 +1,11 @@
-package com.bandlock.wifi.core
+package com.quintz.wifi.core
 
 import android.content.Context
-import com.bandlock.wifi.data.BandLockPreferences
-import com.bandlock.wifi.model.AccessPointRadio
-import com.bandlock.wifi.model.BandType
-import com.bandlock.wifi.model.WifiStatus
-import com.bandlock.wifi.shizuku.ShizukuManager
+import com.quintz.wifi.data.Preferences
+import com.quintz.wifi.model.AccessPointRadio
+import com.quintz.wifi.model.BandType
+import com.quintz.wifi.model.WifiStatus
+import com.quintz.wifi.shizuku.ShizukuManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -14,7 +14,7 @@ import kotlinx.coroutines.withContext
 
 class WifiController(private val context: Context) {
 
-    private val prefs = BandLockPreferences(context)
+    private val prefs = Preferences(context)
 
     private val _status = MutableStateFlow(WifiStatus())
     val status: StateFlow<WifiStatus> = _status.asStateFlow()
@@ -53,7 +53,7 @@ class WifiController(private val context: Context) {
         try {
             android.service.quicksettings.TileService.requestListeningState(
                 context,
-                android.content.ComponentName(context, com.bandlock.wifi.service.BandLockTileService::class.java)
+                android.content.ComponentName(context, com.quintz.wifi.service.TileService::class.java)
             )
         } catch (_: Exception) {}
     }

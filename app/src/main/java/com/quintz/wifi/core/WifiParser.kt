@@ -1,8 +1,8 @@
-package com.bandlock.wifi.core
+package com.quintz.wifi.core
 
-import com.bandlock.wifi.model.AccessPointRadio
-import com.bandlock.wifi.model.BandType
-import com.bandlock.wifi.model.WifiStatus
+import com.quintz.wifi.model.AccessPointRadio
+import com.quintz.wifi.model.BandType
+import com.quintz.wifi.model.WifiStatus
 
 object WifiParser {
 

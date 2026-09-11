@@ -16,7 +16,7 @@
     </queries>
 
     <application
-        android:name=".BandLockApp"
+        android:name=".App"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -24,7 +24,7 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.BandLock">
+        android:theme="@style/Theme.App">
 
         <!-- Shizuku Provider -->
         <provider
@@ -38,7 +38,7 @@
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
-            android:theme="@style/Theme.BandLock">
+            android:theme="@style/Theme.App">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -47,7 +47,7 @@
 
         <!-- Quick Settings Tile Service -->
         <service
-            android:name=".service.BandLockTileService"
+            android:name=".service.TileService"
             android:exported="true"
             android:icon="@drawable/ic_wifi_5g"
             android:label="@string/tile_name"

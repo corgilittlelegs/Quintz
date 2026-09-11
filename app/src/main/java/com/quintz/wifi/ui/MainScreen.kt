@@ -1,4 +1,4 @@
-package com.bandlock.wifi.ui
+package com.quintz.wifi.ui
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -24,10 +24,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.bandlock.wifi.model.AccessPointRadio
-import com.bandlock.wifi.model.BandType
-import com.bandlock.wifi.model.WifiStatus
-import com.bandlock.wifi.ui.theme.*
+import com.quintz.wifi.model.AccessPointRadio
+import com.quintz.wifi.model.BandType
+import com.quintz.wifi.model.ShizukuState
+import com.quintz.wifi.model.WifiStatus
+import com.quintz.wifi.ui.theme.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -75,7 +76,7 @@ fun MainScreen(viewModel: MainViewModel) {
                         Spacer(modifier = Modifier.width(12.dp))
                         Column {
                             Text(
-                                "BandLock",
+                                "Quintz",
                                 style = MaterialTheme.typography.titleLarge,
                                 fontWeight = FontWeight.Bold,
                                 color = TextPrimary
@@ -278,7 +279,7 @@ fun MainScreen(viewModel: MainViewModel) {
 
 @Composable
 fun ShizukuStatusCard(
-    shizukuState: com.bandlock.wifi.model.ShizukuState,
+    shizukuState: ShizukuState,
     onRequestPermission: () -> Unit
 ) {
     if (shizukuState.isPermissionGranted) return
@@ -299,7 +300,7 @@ fun ShizukuStatusCard(
         else -> Quadruple(
             PrimaryIndigoContainer,
             "Shizuku Permission Required",
-            "Grant permission so BandLock can steer and lock your Wi-Fi frequencies.",
+            "Grant permission so Quintz can steer and lock your Wi-Fi frequencies.",
             "Grant Permission"
         )
     }

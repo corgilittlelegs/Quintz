@@ -1,11 +1,11 @@
-package com.bandlock.wifi.data
+package com.quintz.wifi.data
 
 import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
-class BandLockPreferences(context: Context) {
+class Preferences(context: Context) {
 
     private val prefs: SharedPreferences = try {
         val masterKey = MasterKey.Builder(context)
@@ -14,14 +14,14 @@ class BandLockPreferences(context: Context) {
 
         EncryptedSharedPreferences.create(
             context,
-            "bandlock_secure_prefs",
+            "secure_prefs",
             masterKey,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
         )
     } catch (e: Exception) {
         // Fallback to standard private prefs if Keystore is temporarily unavailable
-        context.getSharedPreferences("bandlock_prefs", Context.MODE_PRIVATE)
+        context.getSharedPreferences("prefs", Context.MODE_PRIVATE)
     }
 
     fun savePassword(ssid: String, pass: String) {

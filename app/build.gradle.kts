@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "com.bandlock.wifi"
+    namespace = "com.quintz.wifi"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.bandlock.wifi"
+        applicationId = "com.quintz.wifi"
         minSdk = 29
         targetSdk = 35
         versionCode = 1

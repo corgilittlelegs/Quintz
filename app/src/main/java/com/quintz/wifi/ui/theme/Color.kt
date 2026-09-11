@@ -1,4 +1,4 @@
-package com.bandlock.wifi.ui.theme
+package com.quintz.wifi.ui.theme
 
 import androidx.compose.ui.graphics.Color
 

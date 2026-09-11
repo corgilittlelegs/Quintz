@@ -1,8 +1,8 @@
-package com.bandlock.wifi.shizuku
+package com.quintz.wifi.shizuku
 
 import android.content.Context
 import android.content.pm.PackageManager
-import com.bandlock.wifi.model.ShizukuState
+import com.quintz.wifi.model.ShizukuState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -45,7 +45,7 @@ object ShizukuManager {
         }
 
     fun initialize(context: Context) {
-        val tag = "BandLock"
+        val tag = "Shizuku"
         try {
             newProcessMethod = Shizuku::class.java.getDeclaredMethod(
                 "newProcess",
@@ -72,7 +72,7 @@ object ShizukuManager {
     }
 
     fun updateState(context: Context? = null) {
-        val tag = "BandLock"
+        val tag = "Shizuku"
         val isRunning = try {
             Shizuku.pingBinder()
         } catch (e: Throwable) {
@@ -99,7 +99,7 @@ object ShizukuManager {
     }
 
     fun requestPermission() {
-        android.util.Log.d("BandLock", "Requesting Shizuku permission...")
+        android.util.Log.d("Shizuku", "Requesting Shizuku permission...")
         if (!Shizuku.pingBinder()) return
         if (Shizuku.getVersion() < 11) return
         if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
@@ -114,7 +114,7 @@ object ShizukuManager {
     }
 
     fun exec(command: String, timeoutSeconds: Long = 12): ShellResult {
-        val tag = "BandLock"
+        val tag = "Shizuku"
         if (!isReady()) {
             android.util.Log.w(tag, "exec called but Shizuku not ready: ${_state.value}")
             return ShellResult(-1, "", "Shizuku service not available or permission denied")

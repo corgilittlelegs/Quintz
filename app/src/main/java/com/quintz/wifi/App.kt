@@ -1,9 +1,9 @@
-package com.bandlock.wifi
+package com.quintz.wifi
 
 import android.app.Application
-import com.bandlock.wifi.shizuku.ShizukuManager
+import com.quintz.wifi.shizuku.ShizukuManager
 
-class BandLockApp : Application() {
+class App : Application() {
     override fun onCreate() {
         super.onCreate()
         ShizukuManager.initialize(this)

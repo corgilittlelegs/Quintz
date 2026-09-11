@@ -1,4 +1,4 @@
-package com.bandlock.wifi.ui
+package com.quintz.wifi.ui
 
 import android.content.pm.PackageManager
 import android.os.Build
@@ -8,8 +8,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import com.bandlock.wifi.shizuku.ShizukuManager
-import com.bandlock.wifi.ui.theme.BandLockTheme
+import com.quintz.wifi.shizuku.ShizukuManager
+import com.quintz.wifi.ui.theme.AppTheme
 
 class MainActivity : ComponentActivity() {
 
@@ -30,7 +30,7 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            BandLockTheme {
+            AppTheme {
                 MainScreen(viewModel = viewModel)
             }
         }

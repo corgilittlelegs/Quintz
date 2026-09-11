@@ -1,4 +1,4 @@
-package com.bandlock.wifi.model
+package com.quintz.wifi.model
 
 enum class BandType(val displayName: String, val frequencyRange: String) {
     BAND_2_4_GHZ("2.4 GHz", "2412–2484 MHz"),

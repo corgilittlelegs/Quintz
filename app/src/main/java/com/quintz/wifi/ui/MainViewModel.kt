@@ -1,4 +1,4 @@
-package com.bandlock.wifi.ui
+package com.quintz.wifi.ui
 
 import android.app.Application
 import android.content.Context
@@ -10,14 +10,16 @@ import android.net.NetworkRequest
 import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.bandlock.wifi.core.WifiController
-import com.bandlock.wifi.data.BandLockPreferences
-import com.bandlock.wifi.model.AccessPointRadio
-import com.bandlock.wifi.model.BandType
-import com.bandlock.wifi.model.ShizukuState
-import com.bandlock.wifi.model.WifiStatus
-import com.bandlock.wifi.service.WatchdogService
-import com.bandlock.wifi.shizuku.ShizukuManager
+import com.quintz.wifi.R
+import com.quintz.wifi.core.WifiController
+import com.quintz.wifi.data.Preferences
+import com.quintz.wifi.model.AccessPointRadio
+import com.quintz.wifi.model.BandType
+import com.quintz.wifi.model.ShizukuState
+import com.quintz.wifi.model.WifiStatus
+import com.quintz.wifi.service.TileService
+import com.quintz.wifi.service.WatchdogService
+import com.quintz.wifi.shizuku.ShizukuManager
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -29,7 +31,7 @@ import kotlinx.coroutines.launch
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val controller = WifiController(application)
-    val prefs = BandLockPreferences(application)
+    val prefs = Preferences(application)
 
     val shizukuState: StateFlow<ShizukuState> = ShizukuManager.state
     val wifiStatus: StateFlow<WifiStatus> = controller.status
@@ -78,7 +80,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .build()
             connectivityManager?.registerNetworkCallback(request, networkCallback)
         } catch (e: Exception) {
-            android.util.Log.e("BandLockVM", "Failed to register NetworkCallback", e)
+            android.util.Log.e("MainVM", "Failed to register NetworkCallback", e)
         }
 
         viewModelScope.launch {
@@ -95,7 +97,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 context.startService(intent)
                             }
                         } catch (e: Exception) {
-                            android.util.Log.e("BandLockVM", "Failed to auto-start Watchdog", e)
+                            android.util.Log.e("MainVM", "Failed to auto-start Watchdog", e)
                         }
                     }
                 }
@@ -212,19 +214,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val statusBarManager = context.getSystemService(android.app.StatusBarManager::class.java)
             statusBarManager?.requestAddTileService(
-                android.content.ComponentName(context, com.bandlock.wifi.service.BandLockTileService::class.java),
-                context.getString(com.bandlock.wifi.R.string.tile_name),
-                android.graphics.drawable.Icon.createWithResource(context, com.bandlock.wifi.R.drawable.ic_wifi_5g),
+                android.content.ComponentName(context, TileService::class.java),
+                context.getString(R.string.tile_name),
+                android.graphics.drawable.Icon.createWithResource(context, R.drawable.ic_wifi_5g),
                 context.mainExecutor
             ) { result ->
                 if (result == android.app.StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED) {
-                    _message.value = "BandLock tile added to Quick Settings!"
+                    _message.value = "Quintz tile added to Quick Settings!"
                 } else if (result == android.app.StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ALREADY_ADDED) {
                     _message.value = "Tile is already in your Quick Settings panel"
                 }
             }
         } else {
-            _message.value = "Swipe down twice and tap Edit (✎) to add BandLock tile"
+            _message.value = "Swipe down twice and tap Edit (✎) to add Quintz tile"
         }
     }
 }
