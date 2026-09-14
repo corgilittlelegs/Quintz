@@ -54,8 +54,15 @@ captures/
 .cxx/
 ndkBuild/
 
-# Signing keys
+# Signing keys & secrets
 *.jks
 *.keystore
+*.pem
+*.key
+*.p12
 secrets.properties
+signing.properties
+key.properties
+google-services.json
+.env*
 

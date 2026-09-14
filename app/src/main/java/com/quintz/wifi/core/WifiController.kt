@@ -201,6 +201,9 @@ class WifiController(private val context: Context) {
             if (currentStatus.isConnected && currentStatus.ssid.equals(ssid, ignoreCase = true) &&
                 !currentStatus.bssid.equals(bssid, ignoreCase = true)
             ) {
+                // If already connected to this network on a different BSSID,
+                // Android's WifiNetworkSelector skips re-association. Cycle Wi-Fi briefly to bind immediately.
+                ShizukuManager.exec("cmd wifi set-wifi-enabled disabled && cmd wifi set-wifi-enabled enabled")
                 awaitConnectionSettled(targetBssid = bssid, maxWaitMs = 12000L)
             } else {
                 awaitConnectionSettled(targetBssid = bssid, maxWaitMs = 5000L)
