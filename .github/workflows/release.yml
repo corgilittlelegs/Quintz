@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag to release (e.g. v1.0.0 or 1.0.0). Leave empty to use commit hash.'
+        description: 'Version tag to release (e.g. v1.0.0)'
         required: false
-        default: ''
+        default: 'v1.0.0'
 
 permissions:
   contents: write
@@ -23,10 +23,10 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Full git history so commit count and tags work automatically
+          fetch-depth: 0
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '21'
@@ -38,19 +38,22 @@ jobs:
       - name: Determine Version
         id: get_version
         run: |
-          RAW_TAG="${{ github.event.inputs.version || github.ref_name }}"
-          # Clean leading 'v' for Android versionName (e.g. v1.0.0 -> 1.0.0)
-          VERSION_NAME="${RAW_TAG#v}"
-          if [ -z "$VERSION_NAME" ] || [ "$RAW_TAG" = "main" ]; then
-            VERSION_NAME=$(git describe --tags --always | sed 's/^v//')
-            TAG_NAME="v${VERSION_NAME}"
-          else
-            TAG_NAME="v${VERSION_NAME}"
+          RAW_TAG="${{ github.event.inputs.version }}"
+          if [ -z "$RAW_TAG" ]; then
+            if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+              RAW_TAG="${{ github.ref_name }}"
+            else
+              RAW_TAG="v1.0.0"
+            fi
           fi
+          
+          # Strip leading 'v' for Android versionName (e.g. v1.0.0 -> 1.0.0)
+          VERSION_NAME="${RAW_TAG#v}"
+          TAG_NAME="v${VERSION_NAME}"
           
           echo "version_name=${VERSION_NAME}" >> $GITHUB_OUTPUT
           echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
-          echo "Building Quintz with versionName: ${VERSION_NAME}, tag: ${TAG_NAME}"
+          echo "Resolved version_name: ${VERSION_NAME}, tag_name: ${TAG_NAME}"
 
       - name: Build Release APK
         run: |
@@ -72,11 +75,12 @@ jobs:
           path: ${{ steps.prepare_asset.outputs.apk_path }}
           retention-days: 14
 
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.version != ''
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: ${{ steps.get_version.outputs.tag_name }}
+          target_commitish: ${{ github.sha }}
           name: "Quintz ${{ steps.get_version.outputs.tag_name }}"
           files: ${{ steps.prepare_asset.outputs.apk_path }}
           generate_release_notes: true
