@@ -189,11 +189,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private val _isRadarActive = MutableStateFlow(false)
+    val isRadarActive: StateFlow<Boolean> = _isRadarActive.asStateFlow()
+
+    fun setRadarActive(active: Boolean) {
+        _isRadarActive.value = active
+        if (active && isForeground) {
+            radarEngine.start()
+        } else if (!active) {
+            radarEngine.stop()
+        }
+    }
+
+    fun resumeRadarIfActive() {
+        if (_isRadarActive.value) {
+            radarEngine.start()
+        }
+    }
+
+    fun pauseRadar() {
+        radarEngine.stop()
+    }
+
     fun stopForegroundPolling() {
         isForeground = false
         pollingJob?.cancel()
         pollingJob = null
         stopScannerPolling()
+        pauseRadar()
     }
 
     override fun onCleared() {

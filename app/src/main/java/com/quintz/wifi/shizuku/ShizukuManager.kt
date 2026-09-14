@@ -9,9 +9,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import rikka.shizuku.Shizuku
-import java.io.BufferedReader
-import java.io.InputStreamReader
 import java.lang.reflect.Method
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 data class ShellResult(
     val exitCode: Int,
@@ -25,6 +26,13 @@ object ShizukuManager {
 
     private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
     const val REQUEST_CODE_SHIZUKU_PERMISSION = 7001
+
+    private val shellExecutor = Executors.newCachedThreadPool { runnable ->
+        Thread(runnable).apply {
+            isDaemon = true
+            name = "shizuku-worker"
+        }
+    }
 
     private val _state = MutableStateFlow(ShizukuState())
     val state: StateFlow<ShizukuState> = _state.asStateFlow()
@@ -180,47 +188,44 @@ object ShizukuManager {
             val stdoutBuilder = StringBuilder()
             val stderrBuilder = StringBuilder()
 
-            // Read stdout and stderr concurrently to prevent pipe buffer deadlock
-            val stdoutThread = Thread({
+            // Read stdout and stderr concurrently via shared thread pool to prevent pipe buffer deadlock
+            val stdoutFuture = shellExecutor.submit {
                 try {
                     process.inputStream.bufferedReader().useLines { lines ->
                         lines.forEach { line -> stdoutBuilder.appendLine(line) }
                     }
                 } catch (_: Exception) {}
-            }, "shizuku-stdout")
+            }
 
-            val stderrThread = Thread({
+            val stderrFuture = shellExecutor.submit {
                 try {
                     process.errorStream.bufferedReader().useLines { lines ->
                         lines.forEach { line -> stderrBuilder.appendLine(line) }
                     }
                 } catch (_: Exception) {}
-            }, "shizuku-stderr")
+            }
 
-            stdoutThread.start()
-            stderrThread.start()
-
-            // ShizukuRemoteProcess throws if exitValue() is called before process finishes.
-            // Use thread.join with standard blocking process.waitFor() for safe timeout handling.
-            var code = -1
-            val waitThread = Thread({
+            val waitFuture = shellExecutor.submit<Int> {
                 try {
-                    code = process.waitFor()
-                } catch (_: Exception) {}
-            }, "shizuku-wait")
-            waitThread.start()
-            waitThread.join(timeoutSeconds * 1000)
+                    process.waitFor()
+                } catch (_: Exception) {
+                    -1
+                }
+            }
 
-            if (waitThread.isAlive) {
+            val code = try {
+                waitFuture.get(timeoutSeconds, TimeUnit.SECONDS)
+            } catch (e: TimeoutException) {
                 android.util.Log.w(tag, "Command timed out after ${timeoutSeconds}s: $command")
                 try { process.destroy() } catch (_: Exception) {}
-                stdoutThread.interrupt()
-                stderrThread.interrupt()
+                waitFuture.cancel(true)
+                stdoutFuture.cancel(true)
+                stderrFuture.cancel(true)
                 return ShellResult(-1, "", "Command timed out after ${timeoutSeconds}s")
             }
 
-            stdoutThread.join(1000)
-            stderrThread.join(1000)
+            try { stdoutFuture.get(1, TimeUnit.SECONDS) } catch (_: Exception) {}
+            try { stderrFuture.get(1, TimeUnit.SECONDS) } catch (_: Exception) {}
 
             val stdout = stdoutBuilder.toString().trim()
             val stderr = stderrBuilder.toString().trim()

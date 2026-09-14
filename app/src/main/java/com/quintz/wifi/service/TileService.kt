@@ -80,8 +80,8 @@ class TileService : android.service.quicksettings.TileService() {
 
                 val password = prefs.getPassword(current.ssid)
 
-                if (current.isLockedToBssid && (current.band == BandType.BAND_5_GHZ || current.band == BandType.BAND_6_GHZ)) {
-                    // Currently locked -> Unlock to Auto
+                if (current.isLockedToBssid) {
+                    // Currently locked to any BSSID -> Unlock to Auto
                     withContext(Dispatchers.Main) {
                         tile.state = Tile.STATE_INACTIVE
                         tile.label = "Quintz"
@@ -94,7 +94,7 @@ class TileService : android.service.quicksettings.TileService() {
                         Toast.makeText(this@TileService, "Quintz: Switched to Auto-Roam", Toast.LENGTH_SHORT).show()
                     }
                 } else {
-                    // Auto/2.4G -> Lock to 5 GHz
+                    // Auto mode -> Lock to 5 GHz
                     if (!password.isNullOrEmpty()) {
                         withContext(Dispatchers.Main) {
                             tile.state = Tile.STATE_ACTIVE
@@ -143,6 +143,11 @@ class TileService : android.service.quicksettings.TileService() {
         }
     }
 
+    override fun onDestroy() {
+        serviceScope.cancel()
+        super.onDestroy()
+    }
+
     private fun updateTileState() {
         val tile = qsTile ?: return
 
@@ -163,9 +168,10 @@ class TileService : android.service.quicksettings.TileService() {
                 } else if (status == null || !status.isConnected) {
                     tile.state = Tile.STATE_INACTIVE
                     tile.subtitle = "Disconnected"
-                } else if (status.isLockedToBssid && (status.band == BandType.BAND_5_GHZ || status.band == BandType.BAND_6_GHZ)) {
+                } else if (status.isLockedToBssid) {
                     tile.state = Tile.STATE_ACTIVE
-                    tile.subtitle = "Locked (${status.frequency} MHz)"
+                    val ch = com.quintz.wifi.model.AccessPointRadio.frequencyToChannel(status.frequency)
+                    tile.subtitle = "Locked Ch $ch (${status.band.displayName})"
                 } else {
                     tile.state = Tile.STATE_INACTIVE
                     tile.subtitle = "Auto-Roam (${status.band.displayName})"

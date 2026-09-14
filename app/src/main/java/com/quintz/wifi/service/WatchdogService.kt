@@ -6,9 +6,11 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import com.quintz.wifi.R
 import com.quintz.wifi.core.WifiController
 import com.quintz.wifi.data.Preferences
@@ -35,13 +37,27 @@ class WatchdogService : Service() {
         controller = WifiController(this)
         prefs = Preferences(this)
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("Monitoring Wi-Fi band state..."))
+        startServiceInForeground()
         startWatchdogLoop()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIFICATION_ID, buildNotification("Monitoring Wi-Fi band state..."))
+        startServiceInForeground()
         return START_STICKY
+    }
+
+    private fun startServiceInForeground() {
+        val notification = buildNotification("Monitoring Wi-Fi band state...")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun startWatchdogLoop() {
@@ -68,17 +84,20 @@ class WatchdogService : Service() {
                                 } else {
                                     updateNotification("Locked to 5 GHz • ${status.ssid} (${status.rssi} dBm)")
                                 }
-                            } else if (prefs.lastTargetBand == "5GHz" || status.band == BandType.BAND_2_4_GHZ) {
-                                // In fallback / 2.4 GHz mode: scan to check if 5 GHz is strong again
+                            } else if (prefs.lastTargetBand == "5GHz") {
+                                // In fallback mode: scan to check if 5 GHz is strong again
                                 loopDelay = fallbackScanInterval
                                 val radios = controller.scanRadios()
                                 val strong5G = radios.firstOrNull {
                                     (it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ) &&
                                             it.rssi >= prefs.recoveryThresholdRssi
                                 }
-                                if (strong5G != null && !savedPassword.isNullOrEmpty()) {
+                                val isOpen = strong5G != null && strong5G.flags.uppercase().let {
+                                    !it.contains("PSK") && !it.contains("SAE") && !it.contains("WEP")
+                                }
+                                if (strong5G != null && (!savedPassword.isNullOrEmpty() || isOpen)) {
                                     updateNotification("Strong 5 GHz found (${strong5G.rssi} dBm). Locking to 5 GHz...")
-                                    controller.lockToBssid(status.ssid, strong5G.bssid, savedPassword)
+                                    controller.lockToBssid(status.ssid, strong5G.bssid, savedPassword.orEmpty())
                                     fallbackScanInterval = 12000L
                                 } else {
                                     updateNotification("Connected (${status.band.displayName}) • Monitoring for 5 GHz")

@@ -177,29 +177,33 @@ class WifiController(private val context: Context) {
 
         _isOperating.value = true
         try {
-            // Save password for subsequent auto-actions & watchdog
-            prefs.savePassword(ssid, passphrase)
+            val sec = if (securityType.isNotEmpty()) securityType else detectSecurityType(ssid, bssid)
+            val isOpen = sec == "open" || sec == "owe"
+
+            if (!isOpen && passphrase.isNotEmpty()) {
+                prefs.savePassword(ssid, passphrase)
+            }
             prefs.lastTargetBand = "5GHz"
 
             val escapedSsid = ShizukuManager.escapeShellArg(ssid)
-            val escapedPass = ShizukuManager.escapeShellArg(passphrase)
             val escapedBssid = ShizukuManager.escapeShellArg(bssid)
-            val sec = if (securityType.isNotEmpty()) securityType else detectSecurityType(ssid, bssid)
             val escapedSec = ShizukuManager.escapeShellArg(sec)
 
-            val cmd = "cmd wifi connect-network $escapedSsid $escapedSec $escapedPass -b $escapedBssid"
+            val cmd = if (isOpen) {
+                "cmd wifi connect-network $escapedSsid $escapedSec -b $escapedBssid"
+            } else {
+                val escapedPass = ShizukuManager.escapeShellArg(passphrase)
+                "cmd wifi connect-network $escapedSsid $escapedSec $escapedPass -b $escapedBssid"
+            }
             val result = ShizukuManager.exec(cmd)
 
-            // If already connected to this network on a different BSSID,
-            // Android's WifiNetworkSelector skips re-association. Cycle Wi-Fi briefly to bind immediately.
             val currentStatus = _status.value
             if (currentStatus.isConnected && currentStatus.ssid.equals(ssid, ignoreCase = true) &&
                 !currentStatus.bssid.equals(bssid, ignoreCase = true)
             ) {
-                ShizukuManager.exec("cmd wifi set-wifi-enabled disabled && sleep 1 && cmd wifi set-wifi-enabled enabled")
                 awaitConnectionSettled(targetBssid = bssid, maxWaitMs = 12000L)
             } else {
-                awaitConnectionSettled(targetBssid = bssid, maxWaitMs = 4000L)
+                awaitConnectionSettled(targetBssid = bssid, maxWaitMs = 5000L)
             }
 
             refreshStatus()
@@ -220,17 +224,24 @@ class WifiController(private val context: Context) {
         _isOperating.value = true
         try {
             val pass = passphrase ?: prefs.getPassword(ssid).orEmpty()
-            val escapedSsid = ShizukuManager.escapeShellArg(ssid)
-            val escapedPass = ShizukuManager.escapeShellArg(pass)
             val sec = if (securityType.isNotEmpty()) securityType else detectSecurityType(ssid, "")
-            val escapedSec = ShizukuManager.escapeShellArg(sec)
+            val isOpen = sec == "open" || sec == "owe"
 
             prefs.lastTargetBand = "Auto"
 
-            // 1. Re-add network with NO BSSID so saved profile resets to null
-            ShizukuManager.exec("cmd wifi add-network $escapedSsid $escapedSec $escapedPass")
-            // 2. Connect to any BSSID
-            val result = ShizukuManager.exec("cmd wifi connect-network $escapedSsid $escapedSec $escapedPass")
+            val escapedSsid = ShizukuManager.escapeShellArg(ssid)
+            val escapedSec = ShizukuManager.escapeShellArg(sec)
+
+            val result = if (isOpen) {
+                ShizukuManager.exec("cmd wifi add-network $escapedSsid $escapedSec")
+                ShizukuManager.exec("cmd wifi connect-network $escapedSsid $escapedSec")
+            } else if (pass.isNotEmpty()) {
+                val escapedPass = ShizukuManager.escapeShellArg(pass)
+                ShizukuManager.exec("cmd wifi add-network $escapedSsid $escapedSec $escapedPass")
+                ShizukuManager.exec("cmd wifi connect-network $escapedSsid $escapedSec $escapedPass")
+            } else {
+                ShizukuManager.exec("cmd wifi connect-network $escapedSsid $escapedSec")
+            }
 
             awaitConnectionSettled(targetBssid = null, maxWaitMs = 5000L)
             refreshStatus()

@@ -60,6 +60,37 @@ fun WifiRadarCanvas(
         label = "lockPulse"
     )
 
+    // Reusable paint instances hoisted out of the render loop to eliminate 1,800+ allocations/sec
+    val ringLabelPaint = remember {
+        Paint().apply {
+            typeface = Typeface.MONOSPACE
+        }
+    }
+    val cardinalPaint = remember {
+        Paint().apply {
+            typeface = Typeface.MONOSPACE
+        }
+    }
+    val aheadPaint = remember {
+        Paint().apply {
+            typeface = Typeface.MONOSPACE
+            isFakeBoldText = true
+        }
+    }
+    val blipTextPaint = remember {
+        Paint().apply {
+            color = android.graphics.Color.argb(240, 245, 245, 245)
+            typeface = Typeface.MONOSPACE
+            isFakeBoldText = true
+        }
+    }
+    val lockTextPaint = remember {
+        Paint().apply {
+            typeface = Typeface.MONOSPACE
+            isFakeBoldText = true
+        }
+    }
+
     Canvas(modifier = modifier) {
         val center = Offset(size.width / 2f, size.height / 2f)
         val maxRadius = (min(size.width, size.height) / 2f) - 34.dp.toPx()
@@ -121,6 +152,9 @@ fun WifiRadarCanvas(
             1.00f to "20m"
         )
 
+        ringLabelPaint.color = android.graphics.Color.argb(130, 161, 161, 170)
+        ringLabelPaint.textSize = 9.5.dp.toPx()
+
         for ((fraction, label) in rings) {
             val r = maxRadius * fraction
             drawCircle(
@@ -135,11 +169,7 @@ fun WifiRadarCanvas(
                 label,
                 center.x + 6.dp.toPx(),
                 center.y - r + 13.dp.toPx(),
-                Paint().apply {
-                    color = android.graphics.Color.argb(130, 161, 161, 170)
-                    textSize = 9.5.dp.toPx()
-                    typeface = Typeface.MONOSPACE
-                }
+                ringLabelPaint
             )
         }
 
@@ -185,21 +215,20 @@ fun WifiRadarCanvas(
                 else -> CliTextTertiary.copy(alpha = 0.6f)
             }
 
+            cardinalPaint.color = android.graphics.Color.argb(
+                (color.alpha * 255).toInt(),
+                (color.red * 255).toInt(),
+                (color.green * 255).toInt(),
+                (color.blue * 255).toInt()
+            )
+            cardinalPaint.textSize = if (isNorth) 11.5.dp.toPx() else if (cardinalText.length == 1) 9.5.dp.toPx() else 8.dp.toPx()
+            cardinalPaint.isFakeBoldText = isNorth || cardinalText.length == 1
+
             drawContext.canvas.nativeCanvas.drawText(
                 cardinalText,
                 textPos.x - (if (cardinalText.length > 1) 9.dp.toPx() else 5.dp.toPx()),
                 textPos.y + 4.dp.toPx(),
-                Paint().apply {
-                    this.color = android.graphics.Color.argb(
-                        (color.alpha * 255).toInt(),
-                        (color.red * 255).toInt(),
-                        (color.green * 255).toInt(),
-                        (color.blue * 255).toInt()
-                    )
-                    textSize = if (isNorth) 11.5.dp.toPx() else if (cardinalText.length == 1) 9.5.dp.toPx() else 8.dp.toPx()
-                    typeface = Typeface.MONOSPACE
-                    isFakeBoldText = isNorth || cardinalText.length == 1
-                }
+                cardinalPaint
             )
         }
 
@@ -218,21 +247,19 @@ fun WifiRadarCanvas(
         val aheadLabel = if (radarState.isAlignedAhead) "[ LOCKED AHEAD ]" else "▲ AHEAD"
         val labelWidthApprox = if (radarState.isAlignedAhead) 42.dp.toPx() else 20.dp.toPx()
 
+        aheadPaint.color = android.graphics.Color.argb(
+            (aheadColor.alpha * (if (radarState.isAlignedAhead) lockPulse else 1f) * 255).toInt(),
+            (aheadColor.red * 255).toInt(),
+            (aheadColor.green * 255).toInt(),
+            (aheadColor.blue * 255).toInt()
+        )
+        aheadPaint.textSize = 9.dp.toPx()
+
         drawContext.canvas.nativeCanvas.drawText(
             aheadLabel,
             center.x - labelWidthApprox,
             center.y - maxRadius - 22.dp.toPx(),
-            Paint().apply {
-                color = android.graphics.Color.argb(
-                    (aheadColor.alpha * (if (radarState.isAlignedAhead) lockPulse else 1f) * 255).toInt(),
-                    (aheadColor.red * 255).toInt(),
-                    (aheadColor.green * 255).toInt(),
-                    (aheadColor.blue * 255).toInt()
-                )
-                textSize = 9.dp.toPx()
-                typeface = Typeface.MONOSPACE
-                isFakeBoldText = true
-            }
+            aheadPaint
         )
 
         // ── 6. Rotating Sweep Beam with Trailing Phosphor Glow ──
@@ -313,16 +340,12 @@ fun WifiRadarCanvas(
             )
 
             // Blip Target Label (Distance & RSSI)
+            blipTextPaint.textSize = 9.5.dp.toPx()
             drawContext.canvas.nativeCanvas.drawText(
                 "~${radarState.distanceMeters}m (${radarState.rssi}dBm)",
                 targetX + 9.dp.toPx(),
                 targetY + 4.dp.toPx(),
-                Paint().apply {
-                    color = android.graphics.Color.argb(240, 245, 245, 245)
-                    textSize = 9.5.dp.toPx()
-                    typeface = Typeface.MONOSPACE
-                    isFakeBoldText = true
-                }
+                blipTextPaint
             )
 
             // ── 8. Dynamic Target Lock Reticle at 12 o'clock ──
@@ -337,21 +360,19 @@ fun WifiRadarCanvas(
                     center = Offset(center.x, center.y - maxRadius + 2.dp.toPx())
                 )
 
+                lockTextPaint.color = android.graphics.Color.argb(
+                    (bracketColor.alpha * 255).toInt(),
+                    (bracketColor.red * 255).toInt(),
+                    (bracketColor.green * 255).toInt(),
+                    (bracketColor.blue * 255).toInt()
+                )
+                lockTextPaint.textSize = 9.dp.toPx()
+
                 drawContext.canvas.nativeCanvas.drawText(
                     "[ LOCKED ]",
                     center.x - 24.dp.toPx(),
                     lockBoxY - 4.dp.toPx(),
-                    Paint().apply {
-                        color = android.graphics.Color.argb(
-                            (bracketColor.alpha * 255).toInt(),
-                            (bracketColor.red * 255).toInt(),
-                            (bracketColor.green * 255).toInt(),
-                            (bracketColor.blue * 255).toInt()
-                        )
-                        textSize = 9.dp.toPx()
-                        typeface = Typeface.MONOSPACE
-                        isFakeBoldText = true
-                    }
+                    lockTextPaint
                 )
             } else if (radarState.isCalibrated) {
                 // Directional Turn Indicator Chevron on Bezel

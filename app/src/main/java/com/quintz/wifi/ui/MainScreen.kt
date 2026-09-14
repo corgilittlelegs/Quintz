@@ -206,6 +206,7 @@ fun MainScreen(viewModel: MainViewModel) {
             val isRadarActive = if (isWideScreen) selectedRightPane == RightPaneView.RADAR else selectedPhoneTab == PhoneTab.RADAR
             LaunchedEffect(isRadarActive) {
                 viewModel.setScannerActive(!isRadarActive)
+                viewModel.setRadarActive(isRadarActive)
             }
 
             if (isWideScreen) {
@@ -237,17 +238,18 @@ fun MainScreen(viewModel: MainViewModel) {
                             status = wifiStatus,
                             isOperating = isOperating,
                             onToggleLock = {
-                                val saved = viewModel.getSavedPassword(wifiStatus.ssid)
-                                if (saved.isNotEmpty()) {
-                                    if (wifiStatus.isLockedToBssid) {
-                                        viewModel.unlockToAuto()
-                                    } else {
-                                        viewModel.forceLock5Ghz(saved)
-                                    }
+                                if (wifiStatus.isLockedToBssid) {
+                                    viewModel.unlockToAuto()
                                 } else {
-                                    passwordInput = ""
-                                    targetRadioForPassword = null
-                                    showPasswordDialog = true
+                                    val saved = viewModel.getSavedPassword(wifiStatus.ssid)
+                                    val isCurrentOpen = wifiStatus.securityType == "0" || wifiStatus.securityType == "open"
+                                    if (saved.isNotEmpty() || isCurrentOpen) {
+                                        viewModel.forceLock5Ghz(saved)
+                                    } else {
+                                        passwordInput = ""
+                                        targetRadioForPassword = null
+                                        showPasswordDialog = true
+                                    }
                                 }
                             },
                             onOpenRadar = { selectedRightPane = RightPaneView.RADAR }
@@ -398,14 +400,21 @@ fun MainScreen(viewModel: MainViewModel) {
                                                     radio = radio,
                                                     isCurrent = isCurrent,
                                                     onLockClick = {
-                                                        val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
-                                                        val saved = viewModel.getSavedPassword(targetSsid)
-                                                        if (saved.isNotEmpty()) {
-                                                            viewModel.lockToSpecificRadio(radio, saved)
+                                                        val isOpen = radio.flags.uppercase().let {
+                                                            !it.contains("PSK") && !it.contains("SAE") && !it.contains("WEP")
+                                                        }
+                                                        if (isOpen) {
+                                                            viewModel.lockToSpecificRadio(radio, "")
                                                         } else {
-                                                            targetRadioForPassword = radio
-                                                            passwordInput = ""
-                                                            showPasswordDialog = true
+                                                            val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
+                                                            val saved = viewModel.getSavedPassword(targetSsid)
+                                                            if (saved.isNotEmpty()) {
+                                                                viewModel.lockToSpecificRadio(radio, saved)
+                                                            } else {
+                                                                targetRadioForPassword = radio
+                                                                passwordInput = ""
+                                                                showPasswordDialog = true
+                                                            }
                                                         }
                                                     }
                                                 )
@@ -528,17 +537,18 @@ fun MainScreen(viewModel: MainViewModel) {
                                         status = wifiStatus,
                                         isOperating = isOperating,
                                         onToggleLock = {
-                                            val saved = viewModel.getSavedPassword(wifiStatus.ssid)
-                                            if (saved.isNotEmpty()) {
-                                                if (wifiStatus.isLockedToBssid) {
-                                                    viewModel.unlockToAuto()
-                                                } else {
-                                                    viewModel.forceLock5Ghz(saved)
-                                                }
+                                            if (wifiStatus.isLockedToBssid) {
+                                                viewModel.unlockToAuto()
                                             } else {
-                                                passwordInput = ""
-                                                targetRadioForPassword = null
-                                                showPasswordDialog = true
+                                                val saved = viewModel.getSavedPassword(wifiStatus.ssid)
+                                                val isCurrentOpen = wifiStatus.securityType == "0" || wifiStatus.securityType == "open"
+                                                if (saved.isNotEmpty() || isCurrentOpen) {
+                                                    viewModel.forceLock5Ghz(saved)
+                                                } else {
+                                                    passwordInput = ""
+                                                    targetRadioForPassword = null
+                                                    showPasswordDialog = true
+                                                }
                                             }
                                         },
                                         onOpenRadar = { selectedPhoneTab = PhoneTab.RADAR }
@@ -641,14 +651,21 @@ fun MainScreen(viewModel: MainViewModel) {
                                                     radio = radio,
                                                     isCurrent = isCurrent,
                                                     onLockClick = {
-                                                        val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
-                                                        val saved = viewModel.getSavedPassword(targetSsid)
-                                                        if (saved.isNotEmpty()) {
-                                                            viewModel.lockToSpecificRadio(radio, saved)
+                                                        val isOpen = radio.flags.uppercase().let {
+                                                            !it.contains("PSK") && !it.contains("SAE") && !it.contains("WEP")
+                                                        }
+                                                        if (isOpen) {
+                                                            viewModel.lockToSpecificRadio(radio, "")
                                                         } else {
-                                                            targetRadioForPassword = radio
-                                                            passwordInput = ""
-                                                            showPasswordDialog = true
+                                                            val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
+                                                            val saved = viewModel.getSavedPassword(targetSsid)
+                                                            if (saved.isNotEmpty()) {
+                                                                viewModel.lockToSpecificRadio(radio, saved)
+                                                            } else {
+                                                                targetRadioForPassword = radio
+                                                                passwordInput = ""
+                                                                showPasswordDialog = true
+                                                            }
                                                         }
                                                     }
                                                 )
@@ -688,43 +705,52 @@ fun MainScreen(viewModel: MainViewModel) {
                     style = CliTypography.TelemetryLabel,
                     color = CliAccent5GHz
                 )
+                val isTargetOpen = targetRadioForPassword?.let {
+                    val upper = it.flags.uppercase()
+                    !upper.contains("PSK") && !upper.contains("SAE") && !upper.contains("WEP")
+                } ?: (wifiStatus.securityType == "0" || wifiStatus.securityType == "open")
+
                 val promptSsid = targetRadioForPassword?.ssid?.ifEmpty { wifiStatus.ssid } ?: wifiStatus.ssid
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = if (promptSsid.isNotEmpty()) "Passphrase for \"$promptSsid\"" else "Passphrase for Network",
+                    text = if (promptSsid.isNotEmpty()) "Network: \"$promptSsid\"" else "Network Credentials",
                     style = Typography.titleMedium,
                     color = CliTextPrimary
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "Android requires credentials to enforce specific BSSID binding. Stored securely on-device.",
+                    text = if (isTargetOpen)
+                        "This network is Open / Unsecured. No passphrase required."
+                    else
+                        "Android requires credentials to enforce specific BSSID binding. Stored securely on-device.",
                     style = Typography.bodyMedium,
                     color = CliTextSecondary
                 )
                 Spacer(modifier = Modifier.height(16.dp))
 
-                OutlinedTextField(
-                    value = passwordInput,
-                    onValueChange = { passwordInput = it },
-                    placeholder = {
-                        Text("Enter passphrase :_", style = CliTypography.CodeMono, color = CliTextTertiary)
-                    },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
-                    textStyle = CliTypography.CodeMono.copy(color = CliTextPrimary),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = CliTextPrimary,
-                        unfocusedTextColor = CliTextPrimary,
-                        focusedContainerColor = CliSurfaceElevated,
-                        unfocusedContainerColor = CliSurfaceElevated,
-                        focusedBorderColor = CliAccent5GHz,
-                        unfocusedBorderColor = CliBorder
-                    ),
-                    shape = RoundedCornerShape(6.dp),
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Spacer(modifier = Modifier.height(20.dp))
+                if (!isTargetOpen) {
+                    OutlinedTextField(
+                        value = passwordInput,
+                        onValueChange = { passwordInput = it },
+                        placeholder = {
+                            Text("Enter passphrase :_", style = CliTypography.CodeMono, color = CliTextTertiary)
+                        },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        textStyle = CliTypography.CodeMono.copy(color = CliTextPrimary),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = CliTextPrimary,
+                            unfocusedTextColor = CliTextPrimary,
+                            focusedContainerColor = CliSurfaceElevated,
+                            unfocusedContainerColor = CliSurfaceElevated,
+                            focusedBorderColor = CliAccent5GHz,
+                            unfocusedBorderColor = CliBorder
+                        ),
+                        shape = RoundedCornerShape(6.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+                }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -740,13 +766,14 @@ fun MainScreen(viewModel: MainViewModel) {
                         text = "BIND & LOCK",
                         variant = CliButtonVariant.Primary,
                         onClick = {
-                            if (passwordInput.isNotBlank()) {
+                            if (isTargetOpen || passwordInput.isNotBlank()) {
                                 showPasswordDialog = false
                                 val target = targetRadioForPassword
+                                val pass = if (isTargetOpen) "" else passwordInput
                                 if (target != null) {
-                                    viewModel.lockToSpecificRadio(target, passwordInput)
+                                    viewModel.lockToSpecificRadio(target, pass)
                                 } else {
-                                    viewModel.forceLock5Ghz(passwordInput)
+                                    viewModel.forceLock5Ghz(pass)
                                 }
                             }
                         },
@@ -1059,7 +1086,9 @@ fun CliConnectedHeroPanel(
                     )
                     CliTelemetryMetric(
                         label = "CHANNEL",
-                        value = "Ch ${status.frequency} MHz"
+                        value = if (status.frequency > 0) {
+                            "Ch ${AccessPointRadio.frequencyToChannel(status.frequency)} (${status.frequency} MHz)"
+                        } else "--"
                     )
                     CliTelemetryMetric(
                         label = "STANDARD",

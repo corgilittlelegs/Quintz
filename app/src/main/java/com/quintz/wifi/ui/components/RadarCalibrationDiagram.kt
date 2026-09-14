@@ -53,6 +53,14 @@ fun RadarCalibrationDiagram(
         label = "rotateAngle"
     )
 
+    val diagramTextPaint = remember {
+        Paint().apply {
+            color = android.graphics.Color.argb(220, 74, 222, 128)
+            typeface = Typeface.MONOSPACE
+            isFakeBoldText = true
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -205,16 +213,12 @@ fun RadarCalibrationDiagram(
                     )
 
                     // Direct Line-of-sight label
+                    diagramTextPaint.textSize = 7.5.dp.toPx()
                     drawContext.canvas.nativeCanvas.drawText(
                         "PEAK (-55dBm)",
                         userX - 26.dp.toPx(),
                         tabletY - 6.dp.toPx(),
-                        Paint().apply {
-                            color = android.graphics.Color.argb(220, 74, 222, 128)
-                            textSize = 7.5.dp.toPx()
-                            typeface = Typeface.MONOSPACE
-                            isFakeBoldText = true
-                        }
+                        diagramTextPaint
                     )
 
                     // Rotating Circular Arrow around the person

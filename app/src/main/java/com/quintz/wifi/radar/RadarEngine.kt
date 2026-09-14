@@ -119,22 +119,6 @@ class RadarEngine(private val context: Context) : SensorEventListener {
         return windowManager?.defaultDisplay?.rotation ?: Surface.ROTATION_0
     }
 
-    private fun queryLiveRssi(): Int {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            try {
-                val activeNetwork = connectivityManager?.activeNetwork
-                if (activeNetwork != null) {
-                    val caps = connectivityManager.getNetworkCapabilities(activeNetwork)
-                    val strength = caps?.signalStrength
-                    if (strength != null && strength != 0 && strength > -120) {
-                        return strength
-                    }
-                }
-            } catch (_: Exception) {}
-        }
-        return lastRssi
-    }
-
     private fun sampleCurrentSector(rssiToSample: Int) {
         if (hasInitialHeading && rssiToSample != 0 && rssiToSample > -115 && smoothedHeading >= 0f) {
             val sector = (smoothedHeading / 10f).toInt().coerceIn(0, 35)
@@ -179,13 +163,7 @@ class RadarEngine(private val context: Context) : SensorEventListener {
                 smoothedHeading = lowPassAngle(smoothedHeading, rawHeading, 0.15f)
             }
 
-            // Check live signal strength from system if available
-            val liveRssi = queryLiveRssi()
-            if (liveRssi != 0) {
-                lastRssi = liveRssi
-                sampleCurrentSector(liveRssi)
-            }
-
+            // Heading changed: update canvas display state without stamping stale RSSI
             updateState()
         }
     }
@@ -237,8 +215,8 @@ class RadarEngine(private val context: Context) : SensorEventListener {
         if (relAngle > 180f) relAngle -= 360f
         if (relAngle < -180f) relAngle += 360f
 
-        val calibPercent = ((visitedSectors.size / 24f) * 100f).toInt().coerceIn(0, 100)
-        val isCalibrated = visitedSectors.size >= 16
+        val calibPercent = ((visitedSectors.size / 36f) * 100f).toInt().coerceIn(0, 100)
+        val isCalibrated = visitedSectors.size >= 18
         val isAligned = isCalibrated && abs(relAngle) <= 18f
 
         val guidance = when {

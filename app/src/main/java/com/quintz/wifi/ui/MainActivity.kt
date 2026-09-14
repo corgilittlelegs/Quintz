@@ -43,11 +43,11 @@ class MainActivity : ComponentActivity() {
             viewModel.refreshAll()
         }
         viewModel.startForegroundPolling()
+        viewModel.resumeRadarIfActive()
     }
 
     override fun onPause() {
         super.onPause()
         viewModel.stopForegroundPolling()
-        viewModel.radarEngine.stop()
     }
 }
