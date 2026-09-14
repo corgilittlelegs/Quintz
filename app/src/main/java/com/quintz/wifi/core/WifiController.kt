@@ -1,6 +1,11 @@
 package com.quintz.wifi.core
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.net.wifi.ScanResult
+import android.net.wifi.WifiInfo
+import android.os.Build
 import com.quintz.wifi.data.Preferences
 import com.quintz.wifi.model.AccessPointRadio
 import com.quintz.wifi.model.BandType
@@ -25,21 +30,105 @@ class WifiController(private val context: Context) {
     private val _isOperating = MutableStateFlow(false)
     val isOperating: StateFlow<Boolean> = _isOperating.asStateFlow()
 
+    private val _isScanning = MutableStateFlow(false)
+    val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
+
+    fun getNativeWifiStatus(): WifiStatus {
+        try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return WifiStatus()
+            val activeNetwork = cm.activeNetwork ?: return WifiStatus()
+            val caps = cm.getNetworkCapabilities(activeNetwork) ?: return WifiStatus()
+            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                return WifiStatus()
+            }
+
+            val wifiInfo = caps.transportInfo as? WifiInfo ?: return WifiStatus(isConnected = true)
+            val freq = wifiInfo.frequency
+            val rssi = wifiInfo.rssi
+            val speed = wifiInfo.linkSpeed
+            val rawSsid = wifiInfo.ssid.orEmpty().trim('"')
+            val ssid = if (rawSsid == "<unknown ssid>" || rawSsid == "<none>") "" else rawSsid
+            val rawBssid = wifiInfo.bssid.orEmpty()
+            val bssid = if (rawBssid == "02:00:00:00:00:00") "" else rawBssid
+
+            val standard = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                when (wifiInfo.wifiStandard) {
+                    ScanResult.WIFI_STANDARD_11AX -> "11ax"
+                    ScanResult.WIFI_STANDARD_11AC -> "11ac"
+                    ScanResult.WIFI_STANDARD_11N -> "11n"
+                    ScanResult.WIFI_STANDARD_LEGACY -> "legacy"
+                    8 -> "11be" // ScanResult.WIFI_STANDARD_11BE (API 33+)
+                    else -> "Wi-Fi"
+                }
+            } else {
+                "Wi-Fi"
+            }
+
+            return WifiStatus(
+                isConnected = true,
+                ssid = ssid,
+                bssid = bssid,
+                frequency = freq,
+                band = BandType.fromFrequency(freq),
+                rssi = rssi,
+                linkSpeedMbps = speed,
+                standard = standard
+            )
+        } catch (_: Exception) {
+            return WifiStatus()
+        }
+    }
+
     suspend fun refreshStatus(): WifiStatus = withContext(Dispatchers.IO) {
+        val nativeStatus = getNativeWifiStatus()
+
         if (!ShizukuManager.isReady()) {
-            return@withContext WifiStatus()
+            _status.value = nativeStatus
+            return@withContext nativeStatus
         }
 
+        // 1. Primary shell query
         val statusResult = ShizukuManager.exec("cmd wifi status")
-        val status = WifiParser.parseStatus(statusResult.stdout)
+        var status = WifiParser.parseStatus(statusResult.stdout)
 
-        // Only query BSSID lock if currently connected to an SSID
+        // 2. Fallback: If cmd wifi status reports disconnected, query dumpsys wifi mWifiInfo
+        if (!status.isConnected) {
+            val fallback = ShizukuManager.exec("dumpsys wifi 2>/dev/null | grep -m 1 -A 2 'mWifiInfo SSID:'")
+            if (fallback.stdout.contains("Supplicant state: COMPLETED", ignoreCase = true)) {
+                status = WifiParser.parseStatus(fallback.stdout)
+            }
+        }
+
+        // 3. Fallback: Cross-reference with Android OS native ConnectivityManager ground truth
+        if (!status.isConnected && nativeStatus.isConnected) {
+            var resolvedSsid = nativeStatus.ssid
+            var resolvedBssid = nativeStatus.bssid
+            if (resolvedSsid.isEmpty() || resolvedBssid.isEmpty()) {
+                val dump = ShizukuManager.exec("dumpsys wifi 2>/dev/null | grep -m 1 'mWifiInfo SSID:'")
+                val parsedDump = WifiParser.parseStatus(dump.stdout)
+                if (resolvedSsid.isEmpty()) resolvedSsid = parsedDump.ssid
+                if (resolvedBssid.isEmpty()) resolvedBssid = parsedDump.bssid
+            }
+
+            status = nativeStatus.copy(
+                ssid = resolvedSsid,
+                bssid = resolvedBssid,
+                frequency = if (nativeStatus.frequency != 0) nativeStatus.frequency else status.frequency,
+                band = if (nativeStatus.frequency != 0) BandType.fromFrequency(nativeStatus.frequency) else status.band,
+                rssi = if (nativeStatus.rssi != 0 && nativeStatus.rssi != -127) nativeStatus.rssi else status.rssi,
+                linkSpeedMbps = if (nativeStatus.linkSpeedMbps > 0) nativeStatus.linkSpeedMbps else status.linkSpeedMbps
+            )
+        }
+
+        // 4. Determine if currently connected AP is locked in Android's saved network configuration
         val finalStatus = if (status.isConnected && status.ssid.isNotEmpty()) {
             val grepPattern = ShizukuManager.escapeShellArg("ID: [0-9]+ SSID: \"${status.ssid}\"")
-            // Targeted query: grep -m 1 returns < 200 bytes in ~40ms instead of dumping 1.7 MB
             val lockCheck = ShizukuManager.exec("dumpsys wifi 2>/dev/null | grep -m 1 -E $grepPattern")
-            val (isLocked, lockedBssid) = WifiParser.parseLockedBssid(lockCheck.stdout)
-            status.copy(isLockedToBssid = isLocked, lockedBssid = lockedBssid)
+            val (isProfileLocked, lockedBssid) = WifiParser.parseLockedBssid(lockCheck.stdout)
+            // True only if currently bound/locked to the active BSSID
+            val isCurrentlyLocked = isProfileLocked && lockedBssid.equals(status.bssid, ignoreCase = true)
+            status.copy(isLockedToBssid = isCurrentlyLocked, lockedBssid = lockedBssid)
         } else {
             status
         }
@@ -61,7 +150,7 @@ class WifiController(private val context: Context) {
     suspend fun scanRadios(): List<AccessPointRadio> = withContext(Dispatchers.IO) {
         if (!ShizukuManager.isReady()) return@withContext emptyList()
 
-        _isOperating.value = true
+        _isScanning.value = true
         try {
             ShizukuManager.exec("cmd wifi start-scan")
             kotlinx.coroutines.delay(1200)
@@ -70,15 +159,11 @@ class WifiController(private val context: Context) {
             val currentSsid = _status.value.ssid
             val currentBssid = _status.value.bssid
             
-            val list = if (currentSsid.isNotEmpty()) {
-                WifiParser.parseScanResults(scanResult.stdout, currentSsid, currentBssid)
-            } else {
-                emptyList()
-            }
+            val list = WifiParser.parseScanResults(scanResult.stdout, currentSsid, currentBssid)
             _radios.value = list
             list
         } finally {
-            _isOperating.value = false
+            _isScanning.value = false
         }
     }
 

@@ -17,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -25,6 +26,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -33,6 +35,7 @@ import com.quintz.wifi.model.BandType
 import com.quintz.wifi.model.ShizukuState
 import com.quintz.wifi.model.WifiStatus
 import com.quintz.wifi.radar.RadarEngine
+import com.quintz.wifi.shizuku.ShizukuManager
 import com.quintz.wifi.ui.components.*
 import com.quintz.wifi.ui.radar.WifiRadarView
 import com.quintz.wifi.ui.theme.*
@@ -62,6 +65,7 @@ fun MainScreen(viewModel: MainViewModel) {
     val wifiStatus by viewModel.wifiStatus.collectAsState()
     val radios by viewModel.radios.collectAsState()
     val isOperating by viewModel.isOperating.collectAsState()
+    val isScanning by viewModel.isScanning.collectAsState()
     val message by viewModel.message.collectAsState()
     val watchdogActive by viewModel.watchdogActive.collectAsState()
     val isTileAdded by viewModel.isTileAdded.collectAsState()
@@ -71,27 +75,12 @@ fun MainScreen(viewModel: MainViewModel) {
     var targetRadioForPassword by remember { mutableStateOf<AccessPointRadio?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
 
-    var selectedFilter by remember { mutableStateOf(RadioFilter.ALL) }
-    var selectedRightPane by remember { mutableStateOf(RightPaneView.SCANNER) }
-    var selectedPhoneTab by remember { mutableStateOf(PhoneTab.CONTROLS) }
+    var selectedFilter by rememberSaveable { mutableStateOf(RadioFilter.ALL) }
+    var selectedRightPane by rememberSaveable { mutableStateOf(RightPaneView.SCANNER) }
+    var selectedPhoneTab by rememberSaveable { mutableStateOf(PhoneTab.CONTROLS) }
 
-    // Initialize Radar Sensor Engine
-    val radarEngine = remember { RadarEngine(context) }
-    DisposableEffect(Unit) {
-        radarEngine.start()
-        onDispose { radarEngine.stop() }
-    }
-
-    LaunchedEffect(wifiStatus) {
-        if (wifiStatus.isConnected) {
-            radarEngine.updateWifiMetrics(
-                ssid = wifiStatus.ssid,
-                bssid = wifiStatus.bssid,
-                rssi = wifiStatus.rssi,
-                frequencyMhz = wifiStatus.frequency
-            )
-        }
-    }
+    // Radar Sensor Engine from ViewModel (retains calibration & state across rotations)
+    val radarEngine = viewModel.radarEngine
 
     val filteredRadios = remember(radios, selectedFilter) {
         when (selectedFilter) {
@@ -158,15 +147,37 @@ fun MainScreen(viewModel: MainViewModel) {
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (shizukuState.isPermissionGranted) {
-                            CliBadge(
-                                text = "SHIZUKU OK",
-                                accentColor = CliAccentGreen,
-                                backgroundColor = CliAccentGreenBg,
-                                borderColor = CliAccentGreen.copy(alpha = 0.3f)
+                        // Interactive Shizuku Status Badge: click jumps directly into Shizuku or Play Store
+                        val shizukuBadgeColor = if (shizukuState.isPermissionGranted) CliAccentGreen else CliAccent24GHz
+                        val shizukuBadgeBg = if (shizukuState.isPermissionGranted) CliAccentGreenBg else CliAccent24GHzBg
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(shizukuBadgeBg)
+                                .border(1.dp, shizukuBadgeColor.copy(alpha = 0.4f), RoundedCornerShape(4.dp))
+                                .clickable { ShizukuManager.launchOrInstall(context) }
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = when {
+                                    shizukuState.isPermissionGranted -> "SHIZUKU OK"
+                                    shizukuState.isRunning -> "AUTH NEEDED"
+                                    shizukuState.isInstalled -> "DAEMON OFF"
+                                    else -> "GET SHIZUKU"
+                                },
+                                style = CliTypography.BadgeText,
+                                color = shizukuBadgeColor
                             )
-                            Spacer(modifier = Modifier.width(8.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(
+                                imageVector = Icons.Default.OpenInNew,
+                                contentDescription = "Open Shizuku",
+                                tint = shizukuBadgeColor,
+                                modifier = Modifier.size(11.dp)
+                            )
                         }
+                        Spacer(modifier = Modifier.width(8.dp))
 
                         IconButton(
                             onClick = { viewModel.refreshAll() },
@@ -176,7 +187,7 @@ fun MainScreen(viewModel: MainViewModel) {
                             Icon(
                                 imageVector = Icons.Default.Refresh,
                                 contentDescription = "Refresh Telemetry",
-                                tint = if (isOperating) CliTextTertiary else CliTextSecondary,
+                                tint = if (isScanning) CliAccentGreen else if (isOperating) CliTextTertiary else CliTextSecondary,
                                 modifier = Modifier.size(18.dp)
                             )
                         }
@@ -192,6 +203,10 @@ fun MainScreen(viewModel: MainViewModel) {
                 .padding(paddingValues)
         ) {
             val isWideScreen = maxWidth >= 760.dp
+            val isRadarActive = if (isWideScreen) selectedRightPane == RightPaneView.RADAR else selectedPhoneTab == PhoneTab.RADAR
+            LaunchedEffect(isRadarActive) {
+                viewModel.setScannerActive(!isRadarActive)
+            }
 
             if (isWideScreen) {
                 // ── Two-Pane Mission Control (Tablets & Landscape) ──
@@ -212,7 +227,9 @@ fun MainScreen(viewModel: MainViewModel) {
                         if (!shizukuState.isPermissionGranted) {
                             CliShizukuBanner(
                                 shizukuState = shizukuState,
-                                onRequestPermission = { viewModel.requestShizukuPermission() }
+                                onRequestPermission = { viewModel.requestShizukuPermission() },
+                                onOpenShizuku = { ShizukuManager.openShizukuApp(context) },
+                                onOpenPlayStore = { ShizukuManager.openPlayStore(context) }
                             )
                         }
 
@@ -222,7 +239,7 @@ fun MainScreen(viewModel: MainViewModel) {
                             onToggleLock = {
                                 val saved = viewModel.getSavedPassword(wifiStatus.ssid)
                                 if (saved.isNotEmpty()) {
-                                    if (wifiStatus.isLockedToBssid && (wifiStatus.band == BandType.BAND_5_GHZ || wifiStatus.band == BandType.BAND_6_GHZ)) {
+                                    if (wifiStatus.isLockedToBssid) {
                                         viewModel.unlockToAuto()
                                     } else {
                                         viewModel.forceLock5Ghz(saved)
@@ -245,6 +262,13 @@ fun MainScreen(viewModel: MainViewModel) {
                             isTileAdded = isTileAdded,
                             onAddTile = { viewModel.requestAddQuickTile() },
                             onRemoveTile = { viewModel.removeQuickTile() }
+                        )
+
+                        CliShizukuPanel(
+                            shizukuState = shizukuState,
+                            onOpenShizuku = { ShizukuManager.openShizukuApp(context) },
+                            onOpenPlayStore = { ShizukuManager.openPlayStore(context) },
+                            onRequestPermission = { viewModel.requestShizukuPermission() }
                         )
 
                         Spacer(modifier = Modifier.height(12.dp))
@@ -282,13 +306,24 @@ fun MainScreen(viewModel: MainViewModel) {
                                         .clip(RoundedCornerShape(3.dp))
                                         .background(if (selectedRightPane == RightPaneView.SCANNER) CliSurfaceActive else Color.Transparent)
                                         .clickable { selectedRightPane = RightPaneView.SCANNER }
-                                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                                        .padding(horizontal = 14.dp, vertical = 8.dp)
                                 ) {
-                                    Text(
-                                        text = "AP SCANNER (${radios.size})",
-                                        style = CliTypography.BadgeText,
-                                        color = if (selectedRightPane == RightPaneView.SCANNER) CliTextPrimary else CliTextTertiary
-                                    )
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        if (isScanning && selectedRightPane == RightPaneView.SCANNER) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(6.dp)
+                                                    .clip(CircleShape)
+                                                    .background(CliAccentGreen)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                        }
+                                        Text(
+                                            text = "AP SCANNER (${radios.size})",
+                                            style = CliTypography.BadgeText,
+                                            color = if (selectedRightPane == RightPaneView.SCANNER) CliTextPrimary else CliTextTertiary
+                                        )
+                                    }
                                 }
 
                                 Box(
@@ -296,7 +331,7 @@ fun MainScreen(viewModel: MainViewModel) {
                                         .clip(RoundedCornerShape(3.dp))
                                         .background(if (selectedRightPane == RightPaneView.RADAR) CliSurfaceActive else Color.Transparent)
                                         .clickable { selectedRightPane = RightPaneView.RADAR }
-                                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                                        .padding(horizontal = 14.dp, vertical = 8.dp)
                                 ) {
                                     Text(
                                         text = "WI-FI RADAR",
@@ -358,10 +393,13 @@ fun MainScreen(viewModel: MainViewModel) {
                                             verticalArrangement = Arrangement.spacedBy(10.dp)
                                         ) {
                                             items(filteredRadios) { radio ->
+                                                val isCurrent = wifiStatus.isConnected && radio.bssid.equals(wifiStatus.bssid, ignoreCase = true)
                                                 CliRadioRow(
                                                     radio = radio,
+                                                    isCurrent = isCurrent,
                                                     onLockClick = {
-                                                        val saved = viewModel.getSavedPassword(wifiStatus.ssid)
+                                                        val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
+                                                        val saved = viewModel.getSavedPassword(targetSsid)
                                                         if (saved.isNotEmpty()) {
                                                             viewModel.lockToSpecificRadio(radio, saved)
                                                         } else {
@@ -381,7 +419,7 @@ fun MainScreen(viewModel: MainViewModel) {
 
                                 RightPaneView.RADAR -> {
                                     WifiRadarView(
-                                        radarState = radarEngine.radarState,
+                                        radarEngine = radarEngine,
                                         onResetCalibration = { radarEngine.resetCalibration() }
                                     )
                                 }
@@ -431,11 +469,22 @@ fun MainScreen(viewModel: MainViewModel) {
                                 .padding(vertical = 8.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = "SCANNER (${radios.size})",
-                                style = CliTypography.BadgeText,
-                                color = if (selectedPhoneTab == PhoneTab.SCANNER) CliTextPrimary else CliTextTertiary
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (isScanning && selectedPhoneTab == PhoneTab.SCANNER) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(6.dp)
+                                            .clip(CircleShape)
+                                            .background(CliAccentGreen)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                }
+                                Text(
+                                    text = "SCANNER (${radios.size})",
+                                    style = CliTypography.BadgeText,
+                                    color = if (selectedPhoneTab == PhoneTab.SCANNER) CliTextPrimary else CliTextTertiary
+                                )
+                            }
                         }
 
                         Box(
@@ -469,7 +518,9 @@ fun MainScreen(viewModel: MainViewModel) {
                                     if (!shizukuState.isPermissionGranted) {
                                         CliShizukuBanner(
                                             shizukuState = shizukuState,
-                                            onRequestPermission = { viewModel.requestShizukuPermission() }
+                                            onRequestPermission = { viewModel.requestShizukuPermission() },
+                                            onOpenShizuku = { ShizukuManager.openShizukuApp(context) },
+                                            onOpenPlayStore = { ShizukuManager.openPlayStore(context) }
                                         )
                                     }
 
@@ -479,7 +530,7 @@ fun MainScreen(viewModel: MainViewModel) {
                                         onToggleLock = {
                                             val saved = viewModel.getSavedPassword(wifiStatus.ssid)
                                             if (saved.isNotEmpty()) {
-                                                if (wifiStatus.isLockedToBssid && (wifiStatus.band == BandType.BAND_5_GHZ || wifiStatus.band == BandType.BAND_6_GHZ)) {
+                                                if (wifiStatus.isLockedToBssid) {
                                                     viewModel.unlockToAuto()
                                                 } else {
                                                     viewModel.forceLock5Ghz(saved)
@@ -504,6 +555,13 @@ fun MainScreen(viewModel: MainViewModel) {
                                         onRemoveTile = { viewModel.removeQuickTile() }
                                     )
 
+                                    CliShizukuPanel(
+                                        shizukuState = shizukuState,
+                                        onOpenShizuku = { ShizukuManager.openShizukuApp(context) },
+                                        onOpenPlayStore = { ShizukuManager.openPlayStore(context) },
+                                        onRequestPermission = { viewModel.requestShizukuPermission() }
+                                    )
+
                                     Spacer(modifier = Modifier.height(24.dp))
                                 }
                             }
@@ -515,10 +573,21 @@ fun MainScreen(viewModel: MainViewModel) {
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Text(
-                                            text = "DETECTED RADIOS",
-                                            style = CliTypography.TelemetryLabel
-                                        )
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                text = "DETECTED RADIOS",
+                                                style = CliTypography.TelemetryLabel
+                                            )
+                                            if (isScanning) {
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Text(
+                                                    text = "● SCANNING",
+                                                    style = CliTypography.CodeMono,
+                                                    color = CliAccentGreen,
+                                                    fontSize = 10.sp
+                                                )
+                                            }
+                                        }
 
                                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                             CliFilterChip(
@@ -567,10 +636,13 @@ fun MainScreen(viewModel: MainViewModel) {
                                             verticalArrangement = Arrangement.spacedBy(10.dp)
                                         ) {
                                             items(filteredRadios) { radio ->
+                                                val isCurrent = wifiStatus.isConnected && radio.bssid.equals(wifiStatus.bssid, ignoreCase = true)
                                                 CliRadioRow(
                                                     radio = radio,
+                                                    isCurrent = isCurrent,
                                                     onLockClick = {
-                                                        val saved = viewModel.getSavedPassword(wifiStatus.ssid)
+                                                        val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
+                                                        val saved = viewModel.getSavedPassword(targetSsid)
                                                         if (saved.isNotEmpty()) {
                                                             viewModel.lockToSpecificRadio(radio, saved)
                                                         } else {
@@ -591,7 +663,7 @@ fun MainScreen(viewModel: MainViewModel) {
 
                             PhoneTab.RADAR -> {
                                 WifiRadarView(
-                                    radarState = radarEngine.radarState,
+                                    radarEngine = radarEngine,
                                     onResetCalibration = { radarEngine.resetCalibration() }
                                 )
                             }
@@ -616,9 +688,10 @@ fun MainScreen(viewModel: MainViewModel) {
                     style = CliTypography.TelemetryLabel,
                     color = CliAccent5GHz
                 )
+                val promptSsid = targetRadioForPassword?.ssid?.ifEmpty { wifiStatus.ssid } ?: wifiStatus.ssid
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "Passphrase for \"${wifiStatus.ssid}\"",
+                    text = if (promptSsid.isNotEmpty()) "Passphrase for \"$promptSsid\"" else "Passphrase for Network",
                     style = Typography.titleMedium,
                     color = CliTextPrimary
                 )
@@ -688,29 +761,29 @@ fun MainScreen(viewModel: MainViewModel) {
 @Composable
 fun CliShizukuBanner(
     shizukuState: ShizukuState,
-    onRequestPermission: () -> Unit
+    onRequestPermission: () -> Unit,
+    onOpenShizuku: () -> Unit,
+    onOpenPlayStore: () -> Unit
 ) {
-    val (code, desc, showBtn) = when {
-        !shizukuState.isInstalled -> Triple(
+    val (code, desc) = when {
+        !shizukuState.isInstalled -> Pair(
             "ERR_SHIZUKU_NOT_INSTALLED",
-            "Shizuku service is required to bypass Android network restrictions.",
-            false
+            "Shizuku service is required to bypass Android network restrictions and bind BSSIDs."
         )
-        !shizukuState.isRunning -> Triple(
+        !shizukuState.isRunning -> Pair(
             "ERR_SHIZUKU_DAEMON_STOPPED",
-            "Start Shizuku via Wireless Debugging to activate Wi-Fi steering.",
-            false
+            "Shizuku is installed, but the daemon is not running. Start via Wireless Debugging."
         )
-        else -> Triple(
+        else -> Pair(
             "SYS_AUTH_REQUIRED",
-            "Grant Shizuku permission to allow Quintz to bind specific BSSIDs.",
-            true
+            "Grant Shizuku permission to allow Quintz to bind specific BSSIDs."
         )
     }
 
+    val isAlert = !shizukuState.isInstalled
     CliPanel(
-        borderColor = if (showBtn) CliAccent24GHz.copy(alpha = 0.5f) else CliAccentRed.copy(alpha = 0.5f),
-        containerColor = if (showBtn) CliAccent24GHzBg else CliAccentRedBg
+        borderColor = if (isAlert) CliAccentRed.copy(alpha = 0.5f) else CliAccent24GHz.copy(alpha = 0.5f),
+        containerColor = if (isAlert) CliAccentRedBg else CliAccent24GHzBg
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -721,7 +794,7 @@ fun CliShizukuBanner(
                 Text(
                     text = "[$code]",
                     style = CliTypography.BadgeText,
-                    color = if (showBtn) CliAccent24GHz else CliAccentRed
+                    color = if (isAlert) CliAccentRed else CliAccent24GHz
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
@@ -731,13 +804,150 @@ fun CliShizukuBanner(
                 )
             }
 
-            if (showBtn) {
-                Spacer(modifier = Modifier.width(12.dp))
-                CliButton(
-                    text = "GRANT",
-                    variant = CliButtonVariant.Primary,
-                    onClick = onRequestPermission
+            Spacer(modifier = Modifier.width(12.dp))
+
+            when {
+                !shizukuState.isInstalled -> {
+                    CliButton(
+                        text = "GET SHIZUKU ↗",
+                        variant = CliButtonVariant.Primary,
+                        onClick = onOpenPlayStore
+                    )
+                }
+                !shizukuState.isRunning -> {
+                    CliButton(
+                        text = "OPEN SHIZUKU ↗",
+                        variant = CliButtonVariant.Primary,
+                        onClick = onOpenShizuku
+                    )
+                }
+                else -> {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CliButton(
+                            text = "OPEN ↗",
+                            variant = CliButtonVariant.Ghost,
+                            onClick = onOpenShizuku
+                        )
+                        CliButton(
+                            text = "GRANT",
+                            variant = CliButtonVariant.Primary,
+                            onClick = onRequestPermission
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun CliShizukuPanel(
+    shizukuState: ShizukuState,
+    onOpenShizuku: () -> Unit,
+    onOpenPlayStore: () -> Unit,
+    onRequestPermission: () -> Unit
+) {
+    CliPanel(
+        containerColor = CliSurface,
+        contentPadding = PaddingValues(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "SHIZUKU PRIVILEGED SERVICE",
+                        style = CliTypography.TelemetryLabel
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    when {
+                        shizukuState.isPermissionGranted -> {
+                            CliBadge(
+                                text = if (shizukuState.version > 0) "ACTIVE v${shizukuState.version}" else "ACTIVE",
+                                accentColor = CliAccentGreen,
+                                backgroundColor = CliAccentGreenBg,
+                                borderColor = CliAccentGreen.copy(alpha = 0.5f)
+                            )
+                        }
+                        shizukuState.isRunning -> {
+                            CliBadge(
+                                text = "AUTH REQUIRED",
+                                accentColor = CliAccent24GHz,
+                                backgroundColor = CliAccent24GHzBg,
+                                borderColor = CliAccent24GHz.copy(alpha = 0.5f)
+                            )
+                        }
+                        shizukuState.isInstalled -> {
+                            CliBadge(
+                                text = "DAEMON STOPPED",
+                                accentColor = CliAccent24GHz,
+                                backgroundColor = CliAccent24GHzBg,
+                                borderColor = CliAccent24GHz.copy(alpha = 0.5f)
+                            )
+                        }
+                        else -> {
+                            CliBadge(
+                                text = "NOT INSTALLED",
+                                accentColor = CliAccentRed,
+                                backgroundColor = CliAccentRedBg,
+                                borderColor = CliAccentRed.copy(alpha = 0.5f)
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = when {
+                        shizukuState.isPermissionGranted ->
+                            "Privileged API active. Quintz executes low-level Wi-Fi steering and BSSID binding without root."
+                        shizukuState.isRunning ->
+                            "Daemon is running. Authorize Quintz to unlock BSSID binding and radar telemetry."
+                        shizukuState.isInstalled ->
+                            "App installed, but service daemon is stopped. Start via Wireless Debugging in Shizuku."
+                        else ->
+                            "Shizuku service is required to bypass Android network restrictions and bind BSSIDs."
+                    },
+                    style = Typography.bodyMedium,
+                    color = CliTextSecondary
                 )
+            }
+
+            Spacer(modifier = Modifier.width(14.dp))
+
+            when {
+                !shizukuState.isInstalled -> {
+                    CliButton(
+                        text = "INSTALL ↗",
+                        variant = CliButtonVariant.Primary,
+                        onClick = onOpenPlayStore
+                    )
+                }
+                !shizukuState.isPermissionGranted -> {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        CliButton(
+                            text = "OPEN ↗",
+                            variant = CliButtonVariant.Ghost,
+                            onClick = onOpenShizuku
+                        )
+                        if (shizukuState.isRunning) {
+                            CliButton(
+                                text = "GRANT",
+                                variant = CliButtonVariant.Primary,
+                                onClick = onRequestPermission
+                            )
+                        }
+                    }
+                }
+                else -> {
+                    CliButton(
+                        text = "OPEN APP ↗",
+                        variant = CliButtonVariant.Outlined,
+                        onClick = onOpenShizuku
+                    )
+                }
             }
         }
     }
@@ -751,10 +961,11 @@ fun CliConnectedHeroPanel(
     onOpenRadar: (() -> Unit)? = null
 ) {
     val is5G = status.band == BandType.BAND_5_GHZ || status.band == BandType.BAND_6_GHZ
-    val isLocked = status.isLockedToBssid && is5G
+    val isLocked = status.isLockedToBssid
+    val lockAccent = if (is5G) CliAccent5GHz else CliAccent24GHz
 
     val borderColor by animateColorAsState(
-        targetValue = if (isLocked) CliAccent5GHz.copy(alpha = 0.6f) else CliBorder,
+        targetValue = if (isLocked) lockAccent.copy(alpha = 0.6f) else CliBorder,
         label = "heroBorder"
     )
 
@@ -873,14 +1084,14 @@ fun CliConnectedHeroPanel(
                     Icon(
                         imageVector = if (status.isLockedToBssid) Icons.Default.Lock else Icons.Default.LockOpen,
                         contentDescription = null,
-                        tint = if (status.isLockedToBssid) CliAccent5GHz else CliTextTertiary,
+                        tint = if (status.isLockedToBssid) lockAccent else CliTextTertiary,
                         modifier = Modifier.size(14.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = if (status.isLockedToBssid) "LOCKED TO BSSID" else "ROUTER AUTO-STEER",
                         style = CliTypography.BadgeText,
-                        color = if (status.isLockedToBssid) CliAccent5GHz else CliTextSecondary
+                        color = if (status.isLockedToBssid) lockAccent else CliTextSecondary
                     )
                 }
 
@@ -1045,6 +1256,7 @@ fun CliQuickTilePanel(
 @Composable
 fun CliRadioRow(
     radio: AccessPointRadio,
+    isCurrent: Boolean,
     onLockClick: () -> Unit
 ) {
     val is5G = radio.band == BandType.BAND_5_GHZ || radio.band == BandType.BAND_6_GHZ
@@ -1052,7 +1264,7 @@ fun CliRadioRow(
     val bandBg = if (is5G) CliAccent5GHzBg else CliAccent24GHzBg
 
     CliPanel(
-        borderColor = if (radio.isCurrent) bandColor.copy(alpha = 0.5f) else CliBorder,
+        borderColor = if (isCurrent) bandColor.copy(alpha = 0.5f) else CliBorder,
         containerColor = CliSurface,
         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
     ) {
@@ -1062,6 +1274,17 @@ fun CliRadioRow(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
+                if (radio.ssid.isNotEmpty()) {
+                    Text(
+                        text = radio.ssid,
+                        style = CliTypography.CodeMono,
+                        color = CliTextPrimary,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(3.dp))
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CliBadge(
                         text = radio.band.displayName,
@@ -1073,9 +1296,9 @@ fun CliRadioRow(
                     Text(
                         text = "Ch ${radio.channel} (${radio.frequency} MHz)",
                         style = CliTypography.CodeMono,
-                        color = CliTextPrimary
+                        color = if (radio.ssid.isNotEmpty()) CliTextSecondary else CliTextPrimary
                     )
-                    if (radio.isCurrent) {
+                    if (isCurrent) {
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = "● ACTIVE",
@@ -1085,7 +1308,7 @@ fun CliRadioRow(
                         )
                     }
                 }
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(3.dp))
                 Text(
                     text = radio.bssid,
                     style = CliTypography.CodeMono,
@@ -1100,9 +1323,9 @@ fun CliRadioRow(
                 CliSignalBars(radio.rssi, showDbmText = true)
 
                 CliButton(
-                    text = if (radio.isCurrent) "LOCKED" else "BIND",
-                    variant = if (radio.isCurrent) CliButtonVariant.Ghost else CliButtonVariant.Outlined,
-                    enabled = !radio.isCurrent,
+                    text = if (isCurrent) "LOCKED" else "BIND",
+                    variant = if (isCurrent) CliButtonVariant.Ghost else CliButtonVariant.Outlined,
+                    enabled = !isCurrent,
                     onClick = onLockClick
                 )
             }

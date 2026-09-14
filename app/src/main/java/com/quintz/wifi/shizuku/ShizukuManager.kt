@@ -1,7 +1,9 @@
 package com.quintz.wifi.shizuku
 
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import com.quintz.wifi.model.ShizukuState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -89,13 +91,58 @@ object ShizukuManager {
             false
         }
 
+        val version = if (isRunning) {
+            try { Shizuku.getVersion() } catch (_: Throwable) { 0 }
+        } else 0
+
         val newState = ShizukuState(
             isInstalled = isInstalled,
             isRunning = isRunning,
-            isPermissionGranted = isGranted
+            isPermissionGranted = isGranted,
+            version = version
         )
         android.util.Log.d(tag, "Updated Shizuku state: $newState")
         _state.value = newState
+    }
+
+    fun openShizukuApp(context: Context): Boolean {
+        return try {
+            val launchIntent = context.packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE)
+            if (launchIntent != null) {
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(launchIntent)
+                true
+            } else {
+                false
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("Shizuku", "Failed to launch Shizuku app", e)
+            false
+        }
+    }
+
+    fun openPlayStore(context: Context) {
+        try {
+            val marketIntent = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$SHIZUKU_PACKAGE")).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(marketIntent)
+        } catch (_: Exception) {
+            try {
+                val webIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=$SHIZUKU_PACKAGE")).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(webIntent)
+            } catch (e: Exception) {
+                android.util.Log.e("Shizuku", "Failed to open Play Store link", e)
+            }
+        }
+    }
+
+    fun launchOrInstall(context: Context) {
+        if (!openShizukuApp(context)) {
+            openPlayStore(context)
+        }
     }
 
     fun requestPermission() {

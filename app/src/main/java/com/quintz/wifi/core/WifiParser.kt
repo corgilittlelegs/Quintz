@@ -16,11 +16,23 @@ object WifiParser {
     private val SEC_TYPE_REGEX = Regex("""Security type:\s*(\d+)""")
 
     fun parseStatus(statusOutput: String, lockDumpLine: String? = null): WifiStatus {
-        if (!statusOutput.contains("Wifi is connected to", ignoreCase = true)) {
+        val hasConnectedString = statusOutput.contains("Wifi is connected to", ignoreCase = true)
+        val hasSupplicantCompleted = statusOutput.contains("Supplicant state: COMPLETED", ignoreCase = true) &&
+                !statusOutput.contains("SSID: <unknown ssid>", ignoreCase = true) &&
+                !statusOutput.contains("SSID: <none>", ignoreCase = true)
+
+        if (!hasConnectedString && !hasSupplicantCompleted) {
             return WifiStatus(isConnected = false)
         }
 
-        val ssid = SSID_REGEX.find(statusOutput)?.groupValues?.get(1).orEmpty()
+        var ssid = SSID_REGEX.find(statusOutput)?.groupValues?.get(1)?.trim('"')?.trim().orEmpty()
+        if (ssid == "<unknown ssid>" || ssid == "<none>") ssid = ""
+
+        if (ssid.isEmpty()) {
+            val connectedToMatch = Regex("""Wifi is connected to\s+"?([^"\n]+)"?""", RegexOption.IGNORE_CASE).find(statusOutput)
+            ssid = connectedToMatch?.groupValues?.get(1)?.trim('"')?.trim().orEmpty()
+        }
+
         val bssid = BSSID_REGEX.find(statusOutput)?.groupValues?.get(1).orEmpty()
         val freq = FREQ_REGEX.find(statusOutput)?.groupValues?.get(1)?.toIntOrNull() ?: 0
         val rssi = RSSI_REGEX.find(statusOutput)?.groupValues?.get(1)?.toIntOrNull() ?: 0
@@ -99,21 +111,22 @@ object WifiParser {
                     continue
                 }
 
-                if (ssid.equals(currentSsid, ignoreCase = true)) {
-                    val band = BandType.fromFrequency(freq)
-                    val channel = AccessPointRadio.frequencyToChannel(freq)
-                    results.add(
-                        AccessPointRadio(
-                            bssid = bssid,
-                            frequency = freq,
-                            band = band,
-                            channel = channel,
-                            rssi = rssi,
-                            flags = flags,
-                            isCurrent = bssid.equals(currentBssid, ignoreCase = true)
-                        )
+                val band = BandType.fromFrequency(freq)
+                val channel = AccessPointRadio.frequencyToChannel(freq)
+                val isCurrentRadio = currentBssid.isNotEmpty() && bssid.equals(currentBssid, ignoreCase = true)
+
+                results.add(
+                    AccessPointRadio(
+                        bssid = bssid,
+                        ssid = ssid,
+                        frequency = freq,
+                        band = band,
+                        channel = channel,
+                        rssi = rssi,
+                        flags = flags,
+                        isCurrent = isCurrentRadio
                     )
-                }
+                )
             }
         }
 
@@ -121,9 +134,15 @@ object WifiParser {
         val deduplicated = results.groupBy { it.bssid.lowercase() }
             .map { (_, list) -> list.maxByOrNull { it.rssi } ?: list.first() }
 
-        // Sort: 5 GHz / 6 GHz first, then highest signal
+        // Sort priority:
+        // 1. Currently connected radio first (if connected)
+        // 2. Other radios matching the connected SSID next
+        // 3. 5 GHz / 6 GHz before 2.4 GHz
+        // 4. Highest RSSI (signal strength)
         return deduplicated.sortedWith(
-            compareByDescending<AccessPointRadio> { it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ }
+            compareByDescending<AccessPointRadio> { it.isCurrent }
+                .thenByDescending { currentSsid.isNotEmpty() && it.ssid.equals(currentSsid, ignoreCase = true) }
+                .thenByDescending { it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ }
                 .thenByDescending { it.rssi }
         )
     }

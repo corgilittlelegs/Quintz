@@ -48,5 +48,6 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         viewModel.stopForegroundPolling()
+        viewModel.radarEngine.stop()
     }
 }

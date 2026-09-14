@@ -17,6 +17,7 @@ import com.quintz.wifi.model.AccessPointRadio
 import com.quintz.wifi.model.BandType
 import com.quintz.wifi.model.ShizukuState
 import com.quintz.wifi.model.WifiStatus
+import com.quintz.wifi.radar.RadarEngine
 import com.quintz.wifi.service.TileService
 import com.quintz.wifi.service.TileStateTracker
 import com.quintz.wifi.service.WatchdogService
@@ -35,11 +36,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val controller = WifiController(application)
     val prefs = Preferences(application)
+    val radarEngine = RadarEngine(application)
 
     val shizukuState: StateFlow<ShizukuState> = ShizukuManager.state
     val wifiStatus: StateFlow<WifiStatus> = controller.status
     val radios: StateFlow<List<AccessPointRadio>> = controller.radios
     val isOperating: StateFlow<Boolean> = controller.isOperating
+    val isScanning: StateFlow<Boolean> = controller.isScanning
 
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
@@ -52,9 +55,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val connectivityManager = application.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
     private var pollingJob: Job? = null
+    private var scannerJob: Job? = null
+    private var isForeground = false
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
+            if (!isForeground) return
             viewModelScope.launch {
                 if (ShizukuManager.isReady() && !controller.isOperating.value) {
                     controller.refreshStatus()
@@ -63,14 +69,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
-            viewModelScope.launch {
-                if (ShizukuManager.isReady() && !controller.isOperating.value) {
-                    controller.refreshStatus()
+            if (!isForeground) return
+            val wifiInfo = networkCapabilities.transportInfo as? android.net.wifi.WifiInfo ?: return
+            val currentStatus = controller.status.value
+            // Instant detection for intra-SSID band roaming (5 GHz <-> 2.4 GHz) or AP change
+            val freqChanged = wifiInfo.frequency != 0 && wifiInfo.frequency != currentStatus.frequency
+            val bssid = wifiInfo.bssid
+            val bssidChanged = !bssid.isNullOrEmpty() && bssid != "02:00:00:00:00:00" && !bssid.equals(currentStatus.bssid, ignoreCase = true)
+
+            if (freqChanged || bssidChanged) {
+                viewModelScope.launch {
+                    if (ShizukuManager.isReady() && !controller.isOperating.value) {
+                        controller.refreshStatus()
+                    }
                 }
             }
         }
 
         override fun onLost(network: Network) {
+            if (!isForeground) return
             viewModelScope.launch {
                 if (ShizukuManager.isReady() && !controller.isOperating.value) {
                     controller.refreshStatus()
@@ -98,6 +115,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         checkTileStatus()
 
         viewModelScope.launch {
+            wifiStatus.collect { status ->
+                if (status.isConnected) {
+                    radarEngine.updateWifiMetrics(
+                        ssid = status.ssid,
+                        bssid = status.bssid,
+                        rssi = status.rssi,
+                        frequencyMhz = status.frequency
+                    )
+                }
+            }
+        }
+
+        viewModelScope.launch {
             shizukuState.collect { state ->
                 if (state.isPermissionGranted) {
                     refreshAll()
@@ -120,20 +150,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startForegroundPolling() {
-        if (pollingJob?.isActive == true) return
-        pollingJob = viewModelScope.launch {
-            while (isActive) {
-                if (ShizukuManager.isReady() && !controller.isOperating.value) {
-                    controller.refreshStatus()
+        isForeground = true
+        if (pollingJob?.isActive != true) {
+            pollingJob = viewModelScope.launch {
+                while (isActive) {
+                    if (ShizukuManager.isReady() && !controller.isOperating.value) {
+                        controller.refreshStatus()
+                    }
+                    delay(2500)
                 }
-                delay(2500)
+            }
+        }
+        startScannerPolling()
+    }
+
+    fun startScannerPolling() {
+        if (scannerJob?.isActive == true) return
+        scannerJob = viewModelScope.launch {
+            while (isActive) {
+                if (isForeground && ShizukuManager.isReady() && !controller.isOperating.value && !controller.isScanning.value) {
+                    controller.scanRadios()
+                }
+                delay(8500) // ~10s total cycle time (1.5s scan + 8.5s rest)
             }
         }
     }
 
+    fun stopScannerPolling() {
+        scannerJob?.cancel()
+        scannerJob = null
+    }
+
+    fun setScannerActive(active: Boolean) {
+        if (active) {
+            startScannerPolling()
+        } else {
+            stopScannerPolling()
+        }
+    }
+
     fun stopForegroundPolling() {
+        isForeground = false
         pollingJob?.cancel()
         pollingJob = null
+        stopScannerPolling()
     }
 
     override fun onCleared() {
@@ -177,7 +237,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun lockToSpecificRadio(radio: AccessPointRadio, password: String) {
         viewModelScope.launch {
             val status = wifiStatus.value
-            val success = controller.lockToBssid(status.ssid, radio.bssid, password)
+            val targetSsid = radio.ssid.ifEmpty { status.ssid }
+            val success = controller.lockToBssid(targetSsid, radio.bssid, password)
             refreshAll()
             if (success) {
                 _message.value = "Locked to AP [${radio.bssid}] on ${radio.band.displayName}"

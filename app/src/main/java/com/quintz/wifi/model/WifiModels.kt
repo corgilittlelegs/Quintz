@@ -33,6 +33,7 @@ data class WifiStatus(
 
 data class AccessPointRadio(
     val bssid: String,
+    val ssid: String = "",
     val frequency: Int,
     val band: BandType,
     val channel: Int,
@@ -54,5 +55,6 @@ data class AccessPointRadio(
 data class ShizukuState(
     val isInstalled: Boolean = false,
     val isRunning: Boolean = false,
-    val isPermissionGranted: Boolean = false
+    val isPermissionGranted: Boolean = false,
+    val version: Int = 0
 )

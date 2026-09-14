@@ -46,16 +46,20 @@ class WatchdogService : Service() {
 
     private fun startWatchdogLoop() {
         scope.launch {
+            var fallbackScanInterval = 12000L
+            var lastKnownSsid = ""
             while (isActive) {
                 var loopDelay = 15000L
                 if (prefs.isWatchdogEnabled && ShizukuManager.isReady()) {
                     try {
                         val status = controller.refreshStatus()
                         if (status.isConnected && status.ssid.isNotEmpty()) {
+                            lastKnownSsid = status.ssid
                             val savedPassword = prefs.getPassword(status.ssid)
 
-                            if (status.isLockedToBssid && status.band == BandType.BAND_5_GHZ) {
+                            if (status.isLockedToBssid && (status.band == BandType.BAND_5_GHZ || status.band == BandType.BAND_6_GHZ)) {
                                 // Passive RSSI check: no active radio scan needed when healthy on 5 GHz
+                                fallbackScanInterval = 12000L
                                 if (status.rssi < prefs.fallbackThresholdRssi && status.rssi > -120) {
                                     // Fallback to auto to preserve internet
                                     updateNotification("Low 5 GHz signal (${status.rssi} dBm). Falling back to Auto...")
@@ -64,9 +68,9 @@ class WatchdogService : Service() {
                                 } else {
                                     updateNotification("Locked to 5 GHz • ${status.ssid} (${status.rssi} dBm)")
                                 }
-                            } else if (!status.isLockedToBssid && prefs.lastTargetBand == "5GHz") {
-                                // In fallback/Auto mode: perform scan to check if 5 GHz is back strong
-                                loopDelay = 10000L
+                            } else if (prefs.lastTargetBand == "5GHz" || status.band == BandType.BAND_2_4_GHZ) {
+                                // In fallback / 2.4 GHz mode: scan to check if 5 GHz is strong again
+                                loopDelay = fallbackScanInterval
                                 val radios = controller.scanRadios()
                                 val strong5G = radios.firstOrNull {
                                     (it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ) &&
@@ -75,11 +79,24 @@ class WatchdogService : Service() {
                                 if (strong5G != null && !savedPassword.isNullOrEmpty()) {
                                     updateNotification("Strong 5 GHz found (${strong5G.rssi} dBm). Locking to 5 GHz...")
                                     controller.lockToBssid(status.ssid, strong5G.bssid, savedPassword)
+                                    fallbackScanInterval = 12000L
                                 } else {
-                                    updateNotification("Auto-Roam (${status.band.displayName}) • Monitoring for 5 GHz")
+                                    updateNotification("Connected (${status.band.displayName}) • Monitoring for 5 GHz")
+                                    fallbackScanInterval = (fallbackScanInterval + 4000L).coerceAtMost(30000L)
                                 }
                             } else {
+                                fallbackScanInterval = 12000L
                                 updateNotification("Auto-Roam • ${status.ssid}")
+                            }
+                        } else {
+                            // Connection lost / disconnected
+                            if (lastKnownSsid.isNotEmpty() && prefs.lastTargetBand == "5GHz") {
+                                val savedPassword = prefs.getPassword(lastKnownSsid)
+                                updateNotification("5 GHz lost. Unlocking to Auto to restore connection...")
+                                controller.unlockToAuto(lastKnownSsid, savedPassword)
+                                loopDelay = 6000L
+                            } else {
+                                updateNotification("Wi-Fi disconnected • Monitoring...")
                             }
                         }
                     } catch (e: Exception) {

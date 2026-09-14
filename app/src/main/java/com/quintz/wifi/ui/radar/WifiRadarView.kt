@@ -1,17 +1,32 @@
 package com.quintz.wifi.ui.radar
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CompassCalibration
-import androidx.compose.material.icons.filled.NearMe
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Navigation
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.quintz.wifi.radar.RadarEngine
@@ -21,16 +36,26 @@ import com.quintz.wifi.ui.theme.*
 
 @Composable
 fun WifiRadarView(
-    radarState: RadarState,
+    radarEngine: RadarEngine,
     onResetCalibration: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    DisposableEffect(radarEngine) {
+        radarEngine.start()
+        onDispose { radarEngine.stop() }
+    }
+
+    val radarState = radarEngine.radarState
+    var showExplanation by rememberSaveable { mutableStateOf(false) }
+
     CliPanel(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState()),
         containerColor = CliSurface,
         contentPadding = PaddingValues(16.dp)
     ) {
-        // Top Header Row
+        // ── 1. Header Bar: Title, Target, Status Badge & Guide Button ──
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -41,37 +66,178 @@ fun WifiRadarView(
                     text = "TACTICAL WI-FI RADAR",
                     style = CliTypography.TelemetryLabel
                 )
-                Text(
-                    text = if (radarState.targetSsid.isNotEmpty()) radarState.targetSsid else "Target Scanning...",
-                    style = Typography.titleMedium,
-                    color = CliTextPrimary
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = if (radarState.targetSsid.isNotEmpty()) radarState.targetSsid else "Target Scanning...",
+                        style = Typography.titleMedium,
+                        color = CliTextPrimary
+                    )
+                    if (radarState.targetBssid.isNotEmpty()) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "[${radarState.targetBssid}]",
+                            style = CliTypography.CodeMono,
+                            color = CliTextTertiary,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
             }
 
-            if (radarState.isCalibrated) {
-                CliBadge(
-                    text = "VECTOR LOCKED",
-                    accentColor = CliAccentGreen,
-                    backgroundColor = CliAccentGreenBg,
-                    borderColor = CliAccentGreen.copy(alpha = 0.4f)
-                )
-            } else {
-                CliBadge(
-                    text = "SWEEP TO CALIBRATE",
-                    accentColor = CliAccent24GHz,
-                    backgroundColor = CliAccent24GHzBg,
-                    borderColor = CliAccent24GHz.copy(alpha = 0.4f)
-                )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Info / How It Works Toggle
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(if (showExplanation) CliSurfaceActive else CliSurfaceElevated)
+                        .border(1.dp, if (showExplanation) CliAccent5GHz else CliBorder, RoundedCornerShape(4.dp))
+                        .clickable { showExplanation = !showExplanation }
+                        .padding(horizontal = 8.dp, vertical = 5.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = "Radar Guide",
+                            tint = if (showExplanation) CliAccent5GHz else CliTextSecondary,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (showExplanation) "HIDE GUIDE" else "HOW IT WORKS",
+                            style = CliTypography.BadgeText,
+                            color = if (showExplanation) CliAccent5GHz else CliTextSecondary
+                        )
+                    }
+                }
+
+                // Vector Status Badge
+                when {
+                    radarState.isAlignedAhead -> {
+                        CliBadge(
+                            text = "LOCKED AHEAD",
+                            accentColor = CliAccentGreen,
+                            backgroundColor = CliAccentGreenBg,
+                            borderColor = CliAccentGreen.copy(alpha = 0.5f)
+                        )
+                    }
+                    radarState.isCalibrated -> {
+                        CliBadge(
+                            text = "VECTOR ACQUIRED",
+                            accentColor = CliAccent5GHz,
+                            backgroundColor = CliAccent5GHzBg,
+                            borderColor = CliAccent5GHz.copy(alpha = 0.5f)
+                        )
+                    }
+                    else -> {
+                        CliBadge(
+                            text = "CALIBRATING (${radarState.calibrationPercent}%)",
+                            accentColor = CliAccent24GHz,
+                            backgroundColor = CliAccent24GHzBg,
+                            borderColor = CliAccent24GHz.copy(alpha = 0.5f)
+                        )
+                    }
+                }
             }
+        }
+
+        // ── 2. Collapsible "How It Works" Visual Diagram & Guide Card ──
+        AnimatedVisibility(
+            visible = showExplanation,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically()
+        ) {
+            RadarCalibrationDiagram(
+                modifier = Modifier.padding(top = 12.dp)
+            )
         }
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Radar Canvas Scope
+        // ── 3. Radar Guidance Action Banner ──
+        val bannerBg = when {
+            radarState.isAlignedAhead -> CliAccentGreenBg
+            radarState.isCalibrated -> CliSurfaceElevated
+            else -> CliAccent24GHzBg
+        }
+        val bannerBorder = when {
+            radarState.isAlignedAhead -> CliAccentGreen.copy(alpha = 0.5f)
+            radarState.isCalibrated -> CliAccent5GHz.copy(alpha = 0.4f)
+            else -> CliAccent24GHz.copy(alpha = 0.4f)
+        }
+        val bannerText = when {
+            !radarState.isCalibrated -> "CALIBRATION IN PROGRESS: ROTATE DEVICE 360° SLOWLY (${radarState.visitedSectors.size}/36 SECTORS)"
+            radarState.isAlignedAhead -> "TARGET LOCKED DIRECTLY AHEAD — WALK FORWARD"
+            else -> "ACTION: ${radarState.turnRecommendation} TO FACE ROUTER"
+        }
+        val bannerTextColor = when {
+            radarState.isAlignedAhead -> CliAccentGreen
+            radarState.isCalibrated -> CliAccent5GHz
+            else -> CliAccent24GHz
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(4.dp))
+                .background(bannerBg)
+                .border(1.dp, bannerBorder, RoundedCornerShape(4.dp))
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                if (radarState.isCalibrated && !radarState.isAlignedAhead) {
+                    Icon(
+                        imageVector = Icons.Default.Navigation,
+                        contentDescription = "Turn Indicator",
+                        tint = bannerTextColor,
+                        modifier = Modifier
+                            .size(15.dp)
+                            .rotate(radarState.relativeAngle)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Text(
+                    text = bannerText,
+                    style = CliTypography.CodeMono,
+                    color = bannerTextColor,
+                    fontSize = 11.5.sp
+                )
+            }
+
+            if (!radarState.isCalibrated) {
+                Text(
+                    text = "${radarState.calibrationPercent}%",
+                    style = CliTypography.CodeMono,
+                    color = bannerTextColor,
+                    fontSize = 12.sp
+                )
+            }
+        }
+
+        if (!radarState.isCalibrated) {
+            Spacer(modifier = Modifier.height(4.dp))
+            LinearProgressIndicator(
+                progress = { radarState.calibrationPercent / 100f },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(3.dp)
+                    .clip(RoundedCornerShape(1.5.dp)),
+                color = CliAccent24GHz,
+                trackColor = CliSurfaceElevated
+            )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // ── 4. Radar Canvas Scope ──
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(290.dp)
+                .height(310.dp)
                 .padding(vertical = 4.dp),
             contentAlignment = Alignment.Center
         ) {
@@ -83,40 +249,9 @@ fun WifiRadarView(
             )
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
-        // Calibration Progress Bar
-        Column(modifier = Modifier.fillMaxWidth()) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = if (radarState.isCalibrated) "CALIBRATION: COMPLETE (360° MAPPED)" else "CALIBRATING: ROTATE DEVICE SLOWLY",
-                    style = CliTypography.TelemetryLabel,
-                    color = if (radarState.isCalibrated) CliAccentGreen else CliAccent24GHz
-                )
-                Text(
-                    text = "${radarState.calibrationPercent}%",
-                    style = CliTypography.CodeMono,
-                    color = if (radarState.isCalibrated) CliAccentGreen else CliAccent24GHz
-                )
-            }
-            Spacer(modifier = Modifier.height(4.dp))
-            LinearProgressIndicator(
-                progress = { radarState.calibrationPercent / 100f },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(3.dp)
-                    .clip(RoundedCornerShape(1.5.dp)),
-                color = if (radarState.isCalibrated) CliAccentGreen else CliAccent24GHz,
-                trackColor = CliSurfaceElevated
-            )
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // Telemetry Grid
+        // ── 5. Telemetry Grid ──
         CliPanel(
             borderColor = CliBorderSubtle,
             containerColor = CliSurfaceElevated,
@@ -127,7 +262,29 @@ fun WifiRadarView(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Column {
+                // Heading / Facing Column
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(text = "CURRENT FACING", style = CliTypography.TelemetryLabel)
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = RadarEngine.formatBearingCompass(radarState.currentHeading),
+                        style = CliTypography.TelemetryValue
+                    )
+                }
+
+                // Router Bearing Column
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(text = "ROUTER BEARING", style = CliTypography.TelemetryLabel)
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = if (radarState.isCalibrated) RadarEngine.formatBearingCompass(radarState.targetBearing) else "MAPPING...",
+                        style = CliTypography.TelemetryValue,
+                        color = if (radarState.isAlignedAhead) CliAccentGreen else if (radarState.isCalibrated) CliAccent5GHz else CliTextTertiary
+                    )
+                }
+
+                // Estimated Distance Column
+                Column(modifier = Modifier.weight(1f)) {
                     Text(text = "EST. DISTANCE", style = CliTypography.TelemetryLabel)
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
@@ -136,31 +293,22 @@ fun WifiRadarView(
                     )
                 }
 
-                Column {
-                    Text(text = "PROXIMITY ZONE", style = CliTypography.TelemetryLabel)
+                // Live Signal Column
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(text = "LIVE / PEAK RSSI", style = CliTypography.TelemetryLabel)
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = radarState.proximityZone,
+                        text = "${radarState.rssi} / ${radarState.peakRssi} dBm",
                         style = CliTypography.TelemetryValue,
-                        color = CliAccent5GHz
-                    )
-                }
-
-                Column {
-                    Text(text = "ROUTER BEARING", style = CliTypography.TelemetryLabel)
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = if (radarState.isCalibrated) RadarEngine.formatBearingCompass(radarState.targetBearing) else "CALIBRATING",
-                        style = CliTypography.TelemetryValue,
-                        color = if (radarState.isCalibrated) CliAccentGreen else CliTextTertiary
+                        color = if (radarState.rssi >= -65) CliAccentGreen else if (radarState.rssi >= -78) CliAccent5GHz else CliAccent24GHz
                     )
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
-        // Controls Row
+        // ── 6. Controls Row ──
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -169,7 +317,7 @@ fun WifiRadarView(
                 text = "RE-CALIBRATE BEARING",
                 variant = CliButtonVariant.Outlined,
                 onClick = onResetCalibration,
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.fillMaxWidth()
             )
         }
     }
