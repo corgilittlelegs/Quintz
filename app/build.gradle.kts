@@ -1,3 +1,5 @@
+import java.io.ByteArrayOutputStream
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -8,12 +10,37 @@ android {
     namespace = "com.quintz.wifi"
     compileSdk = 35
 
+    val appVersionName: String = (project.findProperty("versionName") as String?)
+        ?: System.getenv("VERSION_NAME")
+        ?: runCatching {
+            val stdout = ByteArrayOutputStream()
+            rootProject.exec {
+                commandLine("git", "describe", "--tags", "--always")
+                standardOutput = stdout
+            }
+            stdout.toString().trim().removePrefix("v")
+        }.getOrNull()
+        ?.ifEmpty { null }
+        ?: "1.0.0"
+
+    val appVersionCode: Int = (project.findProperty("versionCode") as String?)?.toIntOrNull()
+        ?: System.getenv("VERSION_CODE")?.toIntOrNull()
+        ?: runCatching {
+            val stdout = ByteArrayOutputStream()
+            rootProject.exec {
+                commandLine("git", "rev-list", "--count", "HEAD")
+                standardOutput = stdout
+            }
+            stdout.toString().trim().toInt()
+        }.getOrNull()
+        ?: 1
+
     defaultConfig {
         applicationId = "com.quintz.wifi"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
