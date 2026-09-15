@@ -1303,17 +1303,31 @@ fun CliRadioRow(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                if (radio.ssid.isNotEmpty()) {
-                    Text(
-                        text = radio.ssid,
-                        style = CliTypography.CodeMono,
-                        color = CliTextPrimary,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.height(3.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (radio.ssid.isNotEmpty()) {
+                        Text(
+                            text = radio.ssid,
+                            style = CliTypography.CodeMono,
+                            color = CliTextPrimary,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                    }
+                    if (isCurrent) {
+                        CliBadge(
+                            text = "ACTIVE",
+                            accentColor = CliAccentGreen,
+                            backgroundColor = CliAccentGreenBg,
+                            borderColor = CliAccentGreen.copy(alpha = 0.5f)
+                        )
+                    }
                 }
+                Spacer(modifier = Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CliBadge(
                         text = radio.band.displayName,
@@ -1325,25 +1339,22 @@ fun CliRadioRow(
                     Text(
                         text = "Ch ${radio.channel} (${radio.frequency} MHz)",
                         style = CliTypography.CodeMono,
-                        color = if (radio.ssid.isNotEmpty()) CliTextSecondary else CliTextPrimary
+                        color = if (radio.ssid.isNotEmpty()) CliTextSecondary else CliTextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
-                    if (isCurrent) {
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "● ACTIVE",
-                            style = CliTypography.CodeMono,
-                            color = CliAccentGreen,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
                 }
                 Spacer(modifier = Modifier.height(3.dp))
                 Text(
                     text = radio.bssid,
                     style = CliTypography.CodeMono,
-                    color = CliTextTertiary
+                    color = CliTextTertiary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
+
+            Spacer(modifier = Modifier.width(10.dp))
 
             Row(
                 verticalAlignment = Alignment.CenterVertically,

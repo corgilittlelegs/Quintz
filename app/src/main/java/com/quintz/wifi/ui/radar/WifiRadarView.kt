@@ -27,6 +27,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.quintz.wifi.radar.RadarEngine
@@ -56,88 +57,103 @@ fun WifiRadarView(
         contentPadding = PaddingValues(16.dp)
     ) {
         // ── 1. Header Bar: Title, Target, Status Badge & Guide Button ──
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column {
-                Text(
-                    text = "TACTICAL WI-FI RADAR",
-                    style = CliTypography.TelemetryLabel
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = if (radarState.targetSsid.isNotEmpty()) radarState.targetSsid else "Target Scanning...",
-                        style = Typography.titleMedium,
-                        color = CliTextPrimary
-                    )
-                    if (radarState.targetBssid.isNotEmpty()) {
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "[${radarState.targetBssid}]",
-                            style = CliTypography.CodeMono,
-                            color = CliTextTertiary,
-                            fontSize = 11.sp
-                        )
-                    }
-                }
-            }
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val isNarrow = maxWidth < 480.dp
 
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                // Info / How It Works Toggle
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(if (showExplanation) CliSurfaceActive else CliSurfaceElevated)
-                        .border(1.dp, if (showExplanation) CliAccent5GHz else CliBorder, RoundedCornerShape(4.dp))
-                        .clickable { showExplanation = !showExplanation }
-                        .padding(horizontal = 8.dp, vertical = 5.dp)
+            if (isNarrow) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Info,
-                            contentDescription = "Radar Guide",
-                            tint = if (showExplanation) CliAccent5GHz else CliTextSecondary,
-                            modifier = Modifier.size(13.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Text(
-                            text = if (showExplanation) "HIDE GUIDE" else "HOW IT WORKS",
-                            style = CliTypography.BadgeText,
-                            color = if (showExplanation) CliAccent5GHz else CliTextSecondary
+                            text = "TACTICAL WI-FI RADAR",
+                            style = CliTypography.TelemetryLabel
+                        )
+
+                        VectorStatusBadge(radarState)
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f, fill = false)
+                        ) {
+                            Text(
+                                text = if (radarState.targetSsid.isNotEmpty()) radarState.targetSsid else "Target Scanning...",
+                                style = Typography.titleMedium,
+                                color = CliTextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (radarState.targetBssid.isNotEmpty()) {
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "[${radarState.targetBssid}]",
+                                    style = CliTypography.CodeMono,
+                                    color = CliTextTertiary,
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        GuideToggleButton(
+                            showExplanation = showExplanation,
+                            onToggle = { showExplanation = !showExplanation }
                         )
                     }
                 }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "TACTICAL WI-FI RADAR",
+                            style = CliTypography.TelemetryLabel
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = if (radarState.targetSsid.isNotEmpty()) radarState.targetSsid else "Target Scanning...",
+                                style = Typography.titleMedium,
+                                color = CliTextPrimary
+                            )
+                            if (radarState.targetBssid.isNotEmpty()) {
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "[${radarState.targetBssid}]",
+                                    style = CliTypography.CodeMono,
+                                    color = CliTextTertiary,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                    }
 
-                // Vector Status Badge
-                when {
-                    radarState.isAlignedAhead -> {
-                        CliBadge(
-                            text = "LOCKED AHEAD",
-                            accentColor = CliAccentGreen,
-                            backgroundColor = CliAccentGreenBg,
-                            borderColor = CliAccentGreen.copy(alpha = 0.5f)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        GuideToggleButton(
+                            showExplanation = showExplanation,
+                            onToggle = { showExplanation = !showExplanation }
                         )
-                    }
-                    radarState.isCalibrated -> {
-                        CliBadge(
-                            text = "VECTOR ACQUIRED",
-                            accentColor = CliAccent5GHz,
-                            backgroundColor = CliAccent5GHzBg,
-                            borderColor = CliAccent5GHz.copy(alpha = 0.5f)
-                        )
-                    }
-                    else -> {
-                        CliBadge(
-                            text = "CALIBRATING (${radarState.calibrationPercent}%)",
-                            accentColor = CliAccent24GHz,
-                            backgroundColor = CliAccent24GHzBg,
-                            borderColor = CliAccent24GHz.copy(alpha = 0.5f)
-                        )
+
+                        VectorStatusBadge(radarState)
                     }
                 }
             }
@@ -251,57 +267,114 @@ fun WifiRadarView(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // ── 5. Telemetry Grid ──
+        // ── 5. Telemetry Grid (Adaptive 2x2 for Mobile, 4-column for Tablets) ──
         CliPanel(
             borderColor = CliBorderSubtle,
             containerColor = CliSurfaceElevated,
             contentPadding = PaddingValues(12.dp),
             shape = RoundedCornerShape(4.dp)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                // Heading / Facing Column
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(text = "CURRENT FACING", style = CliTypography.TelemetryLabel)
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = RadarEngine.formatBearingCompass(radarState.currentHeading),
-                        style = CliTypography.TelemetryValue
-                    )
-                }
+            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                val isNarrow = maxWidth < 480.dp
 
-                // Router Bearing Column
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(text = "ROUTER BEARING", style = CliTypography.TelemetryLabel)
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = if (radarState.isCalibrated) RadarEngine.formatBearingCompass(radarState.targetBearing) else "MAPPING...",
-                        style = CliTypography.TelemetryValue,
-                        color = if (radarState.isAlignedAhead) CliAccentGreen else if (radarState.isCalibrated) CliAccent5GHz else CliTextTertiary
-                    )
-                }
+                if (isNarrow) {
+                    // 2x2 Responsive Grid for Mobile
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(text = "CURRENT FACING", style = CliTypography.TelemetryLabel)
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = RadarEngine.formatBearingCompass(radarState.currentHeading),
+                                    style = CliTypography.TelemetryValue
+                                )
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(text = "ROUTER BEARING", style = CliTypography.TelemetryLabel)
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = if (radarState.isCalibrated) RadarEngine.formatBearingCompass(radarState.targetBearing) else "MAPPING...",
+                                    style = CliTypography.TelemetryValue,
+                                    color = if (radarState.isAlignedAhead) CliAccentGreen else if (radarState.isCalibrated) CliAccent5GHz else CliTextTertiary
+                                )
+                            }
+                        }
 
-                // Estimated Distance Column
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(text = "EST. DISTANCE", style = CliTypography.TelemetryLabel)
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = if (radarState.distanceMeters > 0) "~${radarState.distanceMeters} m" else "N/A",
-                        style = CliTypography.TelemetryValue
-                    )
-                }
+                        CliDivider(color = CliBorderSubtle)
 
-                // Live Signal Column
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(text = "LIVE / PEAK RSSI", style = CliTypography.TelemetryLabel)
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "${radarState.rssi} / ${radarState.peakRssi} dBm",
-                        style = CliTypography.TelemetryValue,
-                        color = if (radarState.rssi >= -65) CliAccentGreen else if (radarState.rssi >= -78) CliAccent5GHz else CliAccent24GHz
-                    )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(text = "EST. DISTANCE", style = CliTypography.TelemetryLabel)
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = if (radarState.distanceMeters > 0) "~${radarState.distanceMeters} m" else "N/A",
+                                    style = CliTypography.TelemetryValue
+                                )
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(text = "LIVE / PEAK RSSI", style = CliTypography.TelemetryLabel)
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "${radarState.rssi} / ${radarState.peakRssi} dBm",
+                                    style = CliTypography.TelemetryValue,
+                                    color = if (radarState.rssi >= -65) CliAccentGreen else if (radarState.rssi >= -78) CliAccent5GHz else CliAccent24GHz
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    // 4-Column Row for Tablets / Landscape
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(text = "CURRENT FACING", style = CliTypography.TelemetryLabel)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = RadarEngine.formatBearingCompass(radarState.currentHeading),
+                                style = CliTypography.TelemetryValue
+                            )
+                        }
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(text = "ROUTER BEARING", style = CliTypography.TelemetryLabel)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = if (radarState.isCalibrated) RadarEngine.formatBearingCompass(radarState.targetBearing) else "MAPPING...",
+                                style = CliTypography.TelemetryValue,
+                                color = if (radarState.isAlignedAhead) CliAccentGreen else if (radarState.isCalibrated) CliAccent5GHz else CliTextTertiary
+                            )
+                        }
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(text = "EST. DISTANCE", style = CliTypography.TelemetryLabel)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = if (radarState.distanceMeters > 0) "~${radarState.distanceMeters} m" else "N/A",
+                                style = CliTypography.TelemetryValue
+                            )
+                        }
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(text = "LIVE / PEAK RSSI", style = CliTypography.TelemetryLabel)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "${radarState.rssi} / ${radarState.peakRssi} dBm",
+                                style = CliTypography.TelemetryValue,
+                                color = if (radarState.rssi >= -65) CliAccentGreen else if (radarState.rssi >= -78) CliAccent5GHz else CliAccent24GHz
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -318,6 +391,66 @@ fun WifiRadarView(
                 variant = CliButtonVariant.Outlined,
                 onClick = onResetCalibration,
                 modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}
+
+@Composable
+private fun GuideToggleButton(
+    showExplanation: Boolean,
+    onToggle: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(if (showExplanation) CliSurfaceActive else CliSurfaceElevated)
+            .border(1.dp, if (showExplanation) CliAccent5GHz else CliBorder, RoundedCornerShape(4.dp))
+            .clickable { onToggle() }
+            .padding(horizontal = 8.dp, vertical = 5.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = Icons.Default.Info,
+                contentDescription = "Radar Guide",
+                tint = if (showExplanation) CliAccent5GHz else CliTextSecondary,
+                modifier = Modifier.size(13.dp)
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = if (showExplanation) "HIDE GUIDE" else "HOW IT WORKS",
+                style = CliTypography.BadgeText,
+                color = if (showExplanation) CliAccent5GHz else CliTextSecondary
+            )
+        }
+    }
+}
+
+@Composable
+private fun VectorStatusBadge(radarState: RadarState) {
+    when {
+        radarState.isAlignedAhead -> {
+            CliBadge(
+                text = "LOCKED AHEAD",
+                accentColor = CliAccentGreen,
+                backgroundColor = CliAccentGreenBg,
+                borderColor = CliAccentGreen.copy(alpha = 0.5f)
+            )
+        }
+        radarState.isCalibrated -> {
+            CliBadge(
+                text = "VECTOR ACQUIRED",
+                accentColor = CliAccent5GHz,
+                backgroundColor = CliAccent5GHzBg,
+                borderColor = CliAccent5GHz.copy(alpha = 0.5f)
+            )
+        }
+        else -> {
+            CliBadge(
+                text = "CALIBRATING (${radarState.calibrationPercent}%)",
+                accentColor = CliAccent24GHz,
+                backgroundColor = CliAccent24GHzBg,
+                borderColor = CliAccent24GHz.copy(alpha = 0.5f)
             )
         }
     }
