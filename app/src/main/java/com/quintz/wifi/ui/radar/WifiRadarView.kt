@@ -27,6 +27,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -49,6 +50,10 @@ fun WifiRadarView(
     val radarState = radarEngine.radarState
     var showExplanation by rememberSaveable { mutableStateOf(false) }
 
+    val screenHeight = LocalConfiguration.current.screenHeightDp
+    val isCompactHeight = screenHeight < 500
+    val canvasHeight = if (isCompactHeight) 200.dp else 310.dp
+
     CliPanel(
         modifier = modifier
             .fillMaxWidth()
@@ -58,7 +63,7 @@ fun WifiRadarView(
     ) {
         // ── 1. Header Bar: Title, Target, Status Badge & Guide Button ──
         BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-            val isNarrow = maxWidth < 480.dp
+            val isNarrow = maxWidth < 540.dp
 
             if (isNarrow) {
                 Column(
@@ -253,7 +258,7 @@ fun WifiRadarView(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(310.dp)
+                .height(canvasHeight)
                 .padding(vertical = 4.dp),
             contentAlignment = Alignment.Center
         ) {
@@ -275,7 +280,7 @@ fun WifiRadarView(
             shape = RoundedCornerShape(4.dp)
         ) {
             BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-                val isNarrow = maxWidth < 480.dp
+                val isNarrow = maxWidth < 540.dp
 
                 if (isNarrow) {
                     // 2x2 Responsive Grid for Mobile

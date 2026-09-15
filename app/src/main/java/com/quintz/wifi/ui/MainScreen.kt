@@ -884,48 +884,46 @@ fun CliShizukuPanel(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = "SHIZUKU PRIVILEGED SERVICE",
-                        style = CliTypography.TelemetryLabel
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    when {
-                        shizukuState.isPermissionGranted -> {
-                            CliBadge(
-                                text = if (shizukuState.version > 0) "ACTIVE v${shizukuState.version}" else "ACTIVE",
-                                accentColor = CliAccentGreen,
-                                backgroundColor = CliAccentGreenBg,
-                                borderColor = CliAccentGreen.copy(alpha = 0.5f)
-                            )
-                        }
-                        shizukuState.isRunning -> {
-                            CliBadge(
-                                text = "AUTH REQUIRED",
-                                accentColor = CliAccent24GHz,
-                                backgroundColor = CliAccent24GHzBg,
-                                borderColor = CliAccent24GHz.copy(alpha = 0.5f)
-                            )
-                        }
-                        shizukuState.isInstalled -> {
-                            CliBadge(
-                                text = "DAEMON STOPPED",
-                                accentColor = CliAccent24GHz,
-                                backgroundColor = CliAccent24GHzBg,
-                                borderColor = CliAccent24GHz.copy(alpha = 0.5f)
-                            )
-                        }
-                        else -> {
-                            CliBadge(
-                                text = "NOT INSTALLED",
-                                accentColor = CliAccentRed,
-                                backgroundColor = CliAccentRedBg,
-                                borderColor = CliAccentRed.copy(alpha = 0.5f)
-                            )
-                        }
+                Text(
+                    text = "SHIZUKU PRIVILEGED SERVICE",
+                    style = CliTypography.TelemetryLabel
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                when {
+                    shizukuState.isPermissionGranted -> {
+                        CliBadge(
+                            text = if (shizukuState.version > 0) "ACTIVE v${shizukuState.version}" else "ACTIVE",
+                            accentColor = CliAccentGreen,
+                            backgroundColor = CliAccentGreenBg,
+                            borderColor = CliAccentGreen.copy(alpha = 0.5f)
+                        )
+                    }
+                    shizukuState.isRunning -> {
+                        CliBadge(
+                            text = "AUTH REQUIRED",
+                            accentColor = CliAccent24GHz,
+                            backgroundColor = CliAccent24GHzBg,
+                            borderColor = CliAccent24GHz.copy(alpha = 0.5f)
+                        )
+                    }
+                    shizukuState.isInstalled -> {
+                        CliBadge(
+                            text = "DAEMON STOPPED",
+                            accentColor = CliAccent24GHz,
+                            backgroundColor = CliAccent24GHzBg,
+                            borderColor = CliAccent24GHz.copy(alpha = 0.5f)
+                        )
+                    }
+                    else -> {
+                        CliBadge(
+                            text = "NOT INSTALLED",
+                            accentColor = CliAccentRed,
+                            backgroundColor = CliAccentRedBg,
+                            borderColor = CliAccentRed.copy(alpha = 0.5f)
+                        )
                     }
                 }
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = when {
                         shizukuState.isPermissionGranted ->
@@ -1072,28 +1070,79 @@ fun CliConnectedHeroPanel(
                 contentPadding = PaddingValues(12.dp),
                 shape = RoundedCornerShape(4.dp)
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    CliTelemetryMetric(
-                        label = "SIGNAL",
-                        content = { CliSignalBars(status.rssi, showDbmText = true) }
-                    )
-                    CliTelemetryMetric(
-                        label = "LINK SPEED",
-                        value = "${status.linkSpeedMbps} Mbps"
-                    )
-                    CliTelemetryMetric(
-                        label = "CHANNEL",
-                        value = if (status.frequency > 0) {
-                            "Ch ${AccessPointRadio.frequencyToChannel(status.frequency)} (${status.frequency} MHz)"
-                        } else "--"
-                    )
-                    CliTelemetryMetric(
-                        label = "STANDARD",
-                        value = status.standard.uppercase().ifEmpty { "Wi-Fi" }
-                    )
+                BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                    val isNarrow = maxWidth < 460.dp
+
+                    if (isNarrow) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Box(modifier = Modifier.weight(1f)) {
+                                    CliTelemetryMetric(
+                                        label = "SIGNAL",
+                                        content = { CliSignalBars(status.rssi, showDbmText = true) }
+                                    )
+                                }
+                                Box(modifier = Modifier.weight(1f)) {
+                                    CliTelemetryMetric(
+                                        label = "LINK SPEED",
+                                        value = "${status.linkSpeedMbps} Mbps"
+                                    )
+                                }
+                            }
+
+                            CliDivider(color = CliBorderSubtle)
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Box(modifier = Modifier.weight(1f)) {
+                                    CliTelemetryMetric(
+                                        label = "CHANNEL",
+                                        value = if (status.frequency > 0) {
+                                            "Ch ${AccessPointRadio.frequencyToChannel(status.frequency)} (${status.frequency} MHz)"
+                                        } else "--"
+                                    )
+                                }
+                                Box(modifier = Modifier.weight(1f)) {
+                                    CliTelemetryMetric(
+                                        label = "STANDARD",
+                                        value = status.standard.uppercase().ifEmpty { "Wi-Fi" }
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            CliTelemetryMetric(
+                                label = "SIGNAL",
+                                content = { CliSignalBars(status.rssi, showDbmText = true) }
+                            )
+                            CliTelemetryMetric(
+                                label = "LINK SPEED",
+                                value = "${status.linkSpeedMbps} Mbps"
+                            )
+                            CliTelemetryMetric(
+                                label = "CHANNEL",
+                                value = if (status.frequency > 0) {
+                                    "Ch ${AccessPointRadio.frequencyToChannel(status.frequency)} (${status.frequency} MHz)"
+                                } else "--"
+                            )
+                            CliTelemetryMetric(
+                                label = "STANDARD",
+                                value = status.standard.uppercase().ifEmpty { "Wi-Fi" }
+                            )
+                        }
+                    }
                 }
             }
 
