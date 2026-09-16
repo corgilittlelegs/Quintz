@@ -158,7 +158,7 @@ class WatchdogService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Quintz Watchdog Active")
             .setContentText(text)
-            .setSmallIcon(R.drawable.ic_wifi_5g)
+            .setSmallIcon(R.drawable.ic_qs_tile)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()

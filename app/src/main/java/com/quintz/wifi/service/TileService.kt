@@ -158,7 +158,7 @@ class TileService : android.service.quicksettings.TileService() {
             withContext(Dispatchers.Main) {
                 tile.icon = Icon.createWithResource(
                     this@TileService,
-                    R.drawable.ic_wifi_5g
+                    R.drawable.ic_qs_tile
                 )
                 tile.label = "Quintz"
 

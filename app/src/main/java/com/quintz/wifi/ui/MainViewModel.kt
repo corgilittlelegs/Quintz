@@ -370,7 +370,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             statusBarManager?.requestAddTileService(
                 android.content.ComponentName(context, TileService::class.java),
                 context.getString(R.string.tile_name),
-                android.graphics.drawable.Icon.createWithResource(context, R.drawable.ic_wifi_5g),
+                android.graphics.drawable.Icon.createWithResource(context, R.drawable.ic_qs_tile),
                 context.mainExecutor
             ) { result ->
                 if (result == android.app.StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED) {
