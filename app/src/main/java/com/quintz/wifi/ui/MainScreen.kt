@@ -1156,47 +1156,69 @@ fun CliConnectedHeroPanel(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // BSSID Lock Bar + Radar Trigger
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(CliSurfaceElevated, RoundedCornerShape(4.dp))
-                    .border(1.dp, CliBorderSubtle, RoundedCornerShape(4.dp))
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            // BSSID Lock & Routing Card
+            CliPanel(
+                borderColor = CliBorderSubtle,
+                containerColor = CliSurfaceElevated,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                shape = RoundedCornerShape(4.dp)
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = if (status.isLockedToBssid) Icons.Default.Lock else Icons.Default.LockOpen,
-                        contentDescription = null,
-                        tint = if (status.isLockedToBssid) lockAccent else CliTextTertiary,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = if (status.isLockedToBssid) "LOCKED TO BSSID" else "ROUTER AUTO-STEER",
-                        style = CliTypography.BadgeText,
-                        color = if (status.isLockedToBssid) lockAccent else CliTextSecondary
-                    )
-                }
+                // Top Row: Lock/Steer Status (Left) + RADAR Quick-Launch (Right)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f, fill = false)
+                    ) {
+                        Icon(
+                            imageVector = if (status.isLockedToBssid) Icons.Default.Lock else Icons.Default.LockOpen,
+                            contentDescription = null,
+                            tint = if (status.isLockedToBssid) lockAccent else CliTextTertiary,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (status.isLockedToBssid) "LOCKED TO BSSID" else "ROUTER AUTO-STEER",
+                            style = CliTypography.BadgeText,
+                            color = if (status.isLockedToBssid) lockAccent else CliTextSecondary
+                        )
+                    }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = if (status.bssid.isNotEmpty()) status.bssid else "BSSID hidden (requires Shizuku)",
-                        style = CliTypography.CodeMono,
-                        color = CliTextSecondary
-                    )
                     if (onOpenRadar != null && status.isConnected) {
-                        Spacer(modifier = Modifier.width(8.dp))
                         CliBadge(
-                            text = "RADAR",
+                            text = "RADAR ↗",
                             accentColor = CliAccent5GHz,
                             backgroundColor = CliAccent5GHzBg,
                             borderColor = CliAccent5GHz.copy(alpha = 0.5f),
                             modifier = Modifier.clickable { onOpenRadar() }
                         )
                     }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                CliDivider(color = CliBorderSubtle)
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Bottom Row: Active BSSID
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "ACTIVE BSSID",
+                        style = CliTypography.TelemetryLabel
+                    )
+
+                    Text(
+                        text = if (status.bssid.isNotEmpty()) status.bssid else "Hidden (Requires Shizuku)",
+                        style = CliTypography.CodeMono,
+                        color = if (status.bssid.isNotEmpty()) CliTextSecondary else CliTextTertiary,
+                        fontSize = 11.5.sp
+                    )
                 }
             }
 
