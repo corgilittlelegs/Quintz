@@ -15,10 +15,14 @@ android {
         ?: runCatching {
             val stdout = ByteArrayOutputStream()
             rootProject.exec {
-                commandLine("git", "describe", "--tags", "--always")
+                commandLine("git", "rev-list", "--count", "HEAD")
                 standardOutput = stdout
             }
-            stdout.toString().trim().removePrefix("v")
+            val count = stdout.toString().trim().toInt()
+            val a = 1 + (count / 100)
+            val b = (count / 10) % 10
+            val c = count % 10
+            "$a.$b.$c"
         }.getOrNull()
         ?.ifEmpty { null }
         ?: "1.0.0"
@@ -100,4 +104,11 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+}
+
+tasks.register("printVersion") {
+    doLast {
+        println("versionName: ${android.defaultConfig.versionName}")
+        println("versionCode: ${android.defaultConfig.versionCode}")
+    }
 }

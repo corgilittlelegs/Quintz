@@ -2,14 +2,16 @@ name: Release APK
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag to release (e.g. v1.0.0)'
+        description: 'Version tag to release (e.g. v1.0.0). Leave empty to auto-calculate from commit count.'
         required: false
-        default: 'v1.0.0'
+        default: ''
 
 permissions:
   contents: write
@@ -39,17 +41,21 @@ jobs:
         id: get_version
         run: |
           RAW_TAG="${{ github.event.inputs.version }}"
-          if [ -z "$RAW_TAG" ]; then
-            if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-              RAW_TAG="${{ github.ref_name }}"
-            else
-              RAW_TAG="v1.0.0"
-            fi
+          if [ -n "$RAW_TAG" ]; then
+            VERSION_NAME="${RAW_TAG#v}"
+            TAG_NAME="v${VERSION_NAME}"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            RAW_TAG="${{ github.ref_name }}"
+            VERSION_NAME="${RAW_TAG#v}"
+            TAG_NAME="v${VERSION_NAME}"
+          else
+            COMMITS=$(git rev-list --count HEAD)
+            A=$(( 1 + (COMMITS / 100) ))
+            B=$(( (COMMITS / 10) % 10 ))
+            C=$(( COMMITS % 10 ))
+            VERSION_NAME="${A}.${B}.${C}"
+            TAG_NAME="v${VERSION_NAME}"
           fi
-          
-          # Strip leading 'v' for Android versionName (e.g. v1.0.0 -> 1.0.0)
-          VERSION_NAME="${RAW_TAG#v}"
-          TAG_NAME="v${VERSION_NAME}"
           
           echo "version_name=${VERSION_NAME}" >> $GITHUB_OUTPUT
           echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
