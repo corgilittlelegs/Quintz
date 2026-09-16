@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.wifi.ScanResult
 import android.net.wifi.WifiInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import com.quintz.wifi.data.Preferences
 import com.quintz.wifi.model.AccessPointRadio
@@ -43,16 +44,32 @@ class WifiController(private val context: Context) {
                 return WifiStatus()
             }
 
-            val wifiInfo = caps.transportInfo as? WifiInfo ?: return WifiStatus(isConnected = true)
-            val freq = wifiInfo.frequency
-            val rssi = wifiInfo.rssi
-            val speed = wifiInfo.linkSpeed
-            val rawSsid = wifiInfo.ssid.orEmpty().trim('"')
+            val linkProps = cm.getLinkProperties(activeNetwork)
+            val ipAddress = linkProps?.linkAddresses
+                ?.firstOrNull { it.address is java.net.Inet4Address }
+                ?.address?.hostAddress.orEmpty()
+
+            val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            @Suppress("DEPRECATION")
+            val wmInfo = wm?.connectionInfo
+            val capsWifiInfo = caps.transportInfo as? WifiInfo
+            val wifiInfo = capsWifiInfo ?: wmInfo
+
+            val freq = wifiInfo?.frequency ?: 0
+            val speed = wifiInfo?.linkSpeed ?: 0
+            val rawSsid = wifiInfo?.ssid.orEmpty().trim('"')
             val ssid = if (rawSsid == "<unknown ssid>" || rawSsid == "<none>") "" else rawSsid
-            val rawBssid = wifiInfo.bssid.orEmpty()
+            val rawBssid = wifiInfo?.bssid.orEmpty()
             val bssid = if (rawBssid == "02:00:00:00:00:00") "" else rawBssid
 
-            val standard = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val signalDbm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && caps.signalStrength != NetworkCapabilities.SIGNAL_STRENGTH_UNSPECIFIED) {
+                caps.signalStrength
+            } else {
+                val r = wifiInfo?.rssi ?: 0
+                if (r != -127 && r != 0) r else 0
+            }
+
+            val standard = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && wifiInfo != null) {
                 when (wifiInfo.wifiStandard) {
                     ScanResult.WIFI_STANDARD_11AX -> "11ax"
                     ScanResult.WIFI_STANDARD_11AC -> "11ac"
@@ -71,9 +88,10 @@ class WifiController(private val context: Context) {
                 bssid = bssid,
                 frequency = freq,
                 band = BandType.fromFrequency(freq),
-                rssi = rssi,
+                rssi = signalDbm,
                 linkSpeedMbps = speed,
-                standard = standard
+                standard = standard,
+                ipAddress = ipAddress
             )
         } catch (_: Exception) {
             return WifiStatus()
@@ -117,8 +135,19 @@ class WifiController(private val context: Context) {
                 frequency = if (nativeStatus.frequency != 0) nativeStatus.frequency else status.frequency,
                 band = if (nativeStatus.frequency != 0) BandType.fromFrequency(nativeStatus.frequency) else status.band,
                 rssi = if (nativeStatus.rssi != 0 && nativeStatus.rssi != -127) nativeStatus.rssi else status.rssi,
-                linkSpeedMbps = if (nativeStatus.linkSpeedMbps > 0) nativeStatus.linkSpeedMbps else status.linkSpeedMbps
+                linkSpeedMbps = if (nativeStatus.linkSpeedMbps > 0) nativeStatus.linkSpeedMbps else status.linkSpeedMbps,
+                ipAddress = if (nativeStatus.ipAddress.isNotEmpty()) nativeStatus.ipAddress else status.ipAddress
             )
+        } else if (status.isConnected) {
+            if (status.ipAddress.isEmpty() && nativeStatus.ipAddress.isNotEmpty()) {
+                status = status.copy(ipAddress = nativeStatus.ipAddress)
+            }
+            if (status.frequency == 0 && nativeStatus.frequency != 0) {
+                status = status.copy(frequency = nativeStatus.frequency, band = BandType.fromFrequency(nativeStatus.frequency))
+            }
+            if ((status.rssi == 0 || status.rssi == -127) && nativeStatus.rssi != 0) {
+                status = status.copy(rssi = nativeStatus.rssi)
+            }
         }
 
         // 4. Determine if currently connected AP is locked in Android's saved network configuration

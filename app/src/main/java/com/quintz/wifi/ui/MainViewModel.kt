@@ -77,9 +77,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val bssid = wifiInfo.bssid
             val bssidChanged = !bssid.isNullOrEmpty() && bssid != "02:00:00:00:00:00" && !bssid.equals(currentStatus.bssid, ignoreCase = true)
 
-            if (freqChanged || bssidChanged) {
+            if (freqChanged || bssidChanged || !currentStatus.isConnected) {
                 viewModelScope.launch {
-                    if (ShizukuManager.isReady() && !controller.isOperating.value) {
+                    if (!controller.isOperating.value) {
                         controller.refreshStatus()
                     }
                 }
@@ -89,7 +89,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         override fun onLost(network: Network) {
             if (!isForeground) return
             viewModelScope.launch {
-                if (ShizukuManager.isReady() && !controller.isOperating.value) {
+                if (!controller.isOperating.value) {
                     controller.refreshStatus()
                 }
             }
@@ -104,6 +104,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             connectivityManager?.registerNetworkCallback(request, networkCallback)
         } catch (e: Exception) {
             android.util.Log.e("MainVM", "Failed to register NetworkCallback", e)
+        }
+
+        // Immediately perform initial native Wi-Fi refresh on launch
+        viewModelScope.launch {
+            controller.refreshStatus()
         }
 
         viewModelScope.launch {
@@ -122,6 +127,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         bssid = status.bssid,
                         rssi = status.rssi,
                         frequencyMhz = status.frequency
+                    )
+                } else {
+                    radarEngine.updateWifiMetrics(
+                        ssid = "",
+                        bssid = "",
+                        rssi = 0,
+                        frequencyMhz = 0
                     )
                 }
             }
@@ -154,7 +166,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (pollingJob?.isActive != true) {
             pollingJob = viewModelScope.launch {
                 while (isActive) {
-                    if (ShizukuManager.isReady() && !controller.isOperating.value) {
+                    if (!controller.isOperating.value) {
                         controller.refreshStatus()
                     }
                     delay(2500)
@@ -230,7 +242,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshAll() {
         viewModelScope.launch {
             controller.refreshStatus()
-            controller.scanRadios()
+            if (ShizukuManager.isReady()) {
+                controller.scanRadios()
+            }
             checkTileStatus()
         }
     }

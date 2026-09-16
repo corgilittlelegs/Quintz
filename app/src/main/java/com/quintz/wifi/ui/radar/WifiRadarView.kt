@@ -40,7 +40,10 @@ import com.quintz.wifi.ui.theme.*
 fun WifiRadarView(
     radarEngine: RadarEngine,
     onResetCalibration: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isConnected: Boolean = true,
+    isShizukuReady: Boolean = true,
+    onOpenShizuku: (() -> Unit)? = null
 ) {
     DisposableEffect(radarEngine) {
         radarEngine.start()
@@ -53,6 +56,19 @@ fun WifiRadarView(
     val screenHeight = LocalConfiguration.current.screenHeightDp
     val isCompactHeight = screenHeight < 500
     val canvasHeight = if (isCompactHeight) 200.dp else 310.dp
+
+    val hasValidRssi = radarState.rssi in -110..-20
+    val rssiText = if (hasValidRssi) {
+        "${radarState.rssi} / ${if (radarState.peakRssi in -110..-20) "${radarState.peakRssi} dBm" else "--"}"
+    } else {
+        "-- / -- dBm"
+    }
+    val rssiColor = when {
+        !hasValidRssi -> CliTextTertiary
+        radarState.rssi >= -65 -> CliAccentGreen
+        radarState.rssi >= -78 -> CliAccent5GHz
+        else -> CliAccent24GHz
+    }
 
     CliPanel(
         modifier = modifier
@@ -80,7 +96,7 @@ fun WifiRadarView(
                             style = CliTypography.TelemetryLabel
                         )
 
-                        VectorStatusBadge(radarState)
+                        VectorStatusBadge(radarState, isConnected, isShizukuReady)
                     }
 
                     Row(
@@ -93,7 +109,12 @@ fun WifiRadarView(
                             modifier = Modifier.weight(1f, fill = false)
                         ) {
                             Text(
-                                text = if (radarState.targetSsid.isNotEmpty()) radarState.targetSsid else "Target Scanning...",
+                                text = when {
+                                    !isConnected -> "Wi-Fi Disconnected"
+                                    radarState.targetSsid.isNotEmpty() -> radarState.targetSsid
+                                    !isShizukuReady -> "Wi-Fi Connected"
+                                    else -> "Target Scanning..."
+                                },
                                 style = Typography.titleMedium,
                                 color = CliTextPrimary,
                                 maxLines = 1,
@@ -133,7 +154,12 @@ fun WifiRadarView(
                         )
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                text = if (radarState.targetSsid.isNotEmpty()) radarState.targetSsid else "Target Scanning...",
+                                text = when {
+                                    !isConnected -> "Wi-Fi Disconnected"
+                                    radarState.targetSsid.isNotEmpty() -> radarState.targetSsid
+                                    !isShizukuReady -> "Wi-Fi Connected"
+                                    else -> "Target Scanning..."
+                                },
                                 style = Typography.titleMedium,
                                 color = CliTextPrimary
                             )
@@ -158,7 +184,7 @@ fun WifiRadarView(
                             onToggle = { showExplanation = !showExplanation }
                         )
 
-                        VectorStatusBadge(radarState)
+                        VectorStatusBadge(radarState, isConnected, isShizukuReady)
                     }
                 }
             }
@@ -179,21 +205,30 @@ fun WifiRadarView(
 
         // ── 3. Radar Guidance Action Banner ──
         val bannerBg = when {
+            !isConnected -> CliSurfaceElevated
+            !isShizukuReady -> CliAccent24GHzBg
             radarState.isAlignedAhead -> CliAccentGreenBg
             radarState.isCalibrated -> CliSurfaceElevated
             else -> CliAccent24GHzBg
         }
         val bannerBorder = when {
+            !isConnected -> CliBorderSubtle
+            !isShizukuReady -> CliAccent24GHz.copy(alpha = 0.5f)
             radarState.isAlignedAhead -> CliAccentGreen.copy(alpha = 0.5f)
             radarState.isCalibrated -> CliAccent5GHz.copy(alpha = 0.4f)
             else -> CliAccent24GHz.copy(alpha = 0.4f)
         }
         val bannerText = when {
+            !isConnected -> "NO WI-FI CONNECTION — CONNECT TO A NETWORK TO ENABLE RADAR"
+            !isShizukuReady -> "SHIZUKU DAEMON STOPPED — START SHIZUKU FOR BSSID & BEARING TELEMETRY"
+            radarState.rssi == 0 -> "WAITING FOR RSSI SIGNAL TELEMETRY..."
             !radarState.isCalibrated -> "CALIBRATION IN PROGRESS: ROTATE DEVICE 360° SLOWLY (${radarState.visitedSectors.size}/36 SECTORS)"
             radarState.isAlignedAhead -> "TARGET LOCKED DIRECTLY AHEAD — WALK FORWARD"
             else -> "ACTION: ${radarState.turnRecommendation} TO FACE ROUTER"
         }
         val bannerTextColor = when {
+            !isConnected -> CliTextSecondary
+            !isShizukuReady -> CliAccent24GHz
             radarState.isAlignedAhead -> CliAccentGreen
             radarState.isCalibrated -> CliAccent5GHz
             else -> CliAccent24GHz
@@ -210,7 +245,7 @@ fun WifiRadarView(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                if (radarState.isCalibrated && !radarState.isAlignedAhead) {
+                if (isConnected && isShizukuReady && radarState.isCalibrated && !radarState.isAlignedAhead) {
                     Icon(
                         imageVector = Icons.Default.Navigation,
                         contentDescription = "Turn Indicator",
@@ -229,7 +264,17 @@ fun WifiRadarView(
                 )
             }
 
-            if (!radarState.isCalibrated) {
+            if (!isShizukuReady && onOpenShizuku != null) {
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "OPEN ↗",
+                    style = CliTypography.BadgeText,
+                    color = CliAccent24GHz,
+                    modifier = Modifier
+                        .clickable { onOpenShizuku() }
+                        .padding(4.dp)
+                )
+            } else if (isConnected && isShizukuReady && hasValidRssi && !radarState.isCalibrated) {
                 Text(
                     text = "${radarState.calibrationPercent}%",
                     style = CliTypography.CodeMono,
@@ -239,7 +284,7 @@ fun WifiRadarView(
             }
         }
 
-        if (!radarState.isCalibrated) {
+        if (isConnected && isShizukuReady && hasValidRssi && !radarState.isCalibrated) {
             Spacer(modifier = Modifier.height(4.dp))
             LinearProgressIndicator(
                 progress = { radarState.calibrationPercent / 100f },
@@ -259,7 +304,9 @@ fun WifiRadarView(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(canvasHeight)
-                .padding(vertical = 4.dp),
+                .clip(RoundedCornerShape(6.dp))
+                .background(CliBackground)
+                .border(1.dp, CliBorderSubtle, RoundedCornerShape(6.dp)),
             contentAlignment = Alignment.Center
         ) {
             WifiRadarCanvas(
@@ -272,7 +319,7 @@ fun WifiRadarView(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // ── 5. Telemetry Grid (Adaptive 2x2 for Mobile, 4-column for Tablets) ──
+        // ── 5. Telemetry Metric Readout Panel ──
         CliPanel(
             borderColor = CliBorderSubtle,
             containerColor = CliSurfaceElevated,
@@ -280,10 +327,10 @@ fun WifiRadarView(
             shape = RoundedCornerShape(4.dp)
         ) {
             BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-                val isNarrow = maxWidth < 540.dp
+                val isNarrow = maxWidth < 460.dp
 
                 if (isNarrow) {
-                    // 2x2 Responsive Grid for Mobile
+                    // 2x2 Grid for Narrow Screens & Phones
                     Column(
                         modifier = Modifier.fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -304,7 +351,12 @@ fun WifiRadarView(
                                 Text(text = "ROUTER BEARING", style = CliTypography.TelemetryLabel)
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text(
-                                    text = if (radarState.isCalibrated) RadarEngine.formatBearingCompass(radarState.targetBearing) else "MAPPING...",
+                                    text = when {
+                                        !isConnected -> "--"
+                                        radarState.isCalibrated -> RadarEngine.formatBearingCompass(radarState.targetBearing)
+                                        !isShizukuReady -> "PAUSED"
+                                        else -> "MAPPING..."
+                                    },
                                     style = CliTypography.TelemetryValue,
                                     color = if (radarState.isAlignedAhead) CliAccentGreen else if (radarState.isCalibrated) CliAccent5GHz else CliTextTertiary
                                 )
@@ -321,7 +373,7 @@ fun WifiRadarView(
                                 Text(text = "EST. DISTANCE", style = CliTypography.TelemetryLabel)
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text(
-                                    text = if (radarState.distanceMeters > 0) "~${radarState.distanceMeters} m" else "N/A",
+                                    text = if (isConnected && radarState.distanceMeters > 0) "~${radarState.distanceMeters} m" else "N/A",
                                     style = CliTypography.TelemetryValue
                                 )
                             }
@@ -329,9 +381,9 @@ fun WifiRadarView(
                                 Text(text = "LIVE / PEAK RSSI", style = CliTypography.TelemetryLabel)
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text(
-                                    text = "${radarState.rssi} / ${radarState.peakRssi} dBm",
+                                    text = rssiText,
                                     style = CliTypography.TelemetryValue,
-                                    color = if (radarState.rssi >= -65) CliAccentGreen else if (radarState.rssi >= -78) CliAccent5GHz else CliAccent24GHz
+                                    color = rssiColor
                                 )
                             }
                         }
@@ -355,7 +407,12 @@ fun WifiRadarView(
                             Text(text = "ROUTER BEARING", style = CliTypography.TelemetryLabel)
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
-                                text = if (radarState.isCalibrated) RadarEngine.formatBearingCompass(radarState.targetBearing) else "MAPPING...",
+                                text = when {
+                                    !isConnected -> "--"
+                                    radarState.isCalibrated -> RadarEngine.formatBearingCompass(radarState.targetBearing)
+                                    !isShizukuReady -> "PAUSED"
+                                    else -> "MAPPING..."
+                                },
                                 style = CliTypography.TelemetryValue,
                                 color = if (radarState.isAlignedAhead) CliAccentGreen else if (radarState.isCalibrated) CliAccent5GHz else CliTextTertiary
                             )
@@ -365,7 +422,7 @@ fun WifiRadarView(
                             Text(text = "EST. DISTANCE", style = CliTypography.TelemetryLabel)
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
-                                text = if (radarState.distanceMeters > 0) "~${radarState.distanceMeters} m" else "N/A",
+                                text = if (isConnected && radarState.distanceMeters > 0) "~${radarState.distanceMeters} m" else "N/A",
                                 style = CliTypography.TelemetryValue
                             )
                         }
@@ -374,9 +431,9 @@ fun WifiRadarView(
                             Text(text = "LIVE / PEAK RSSI", style = CliTypography.TelemetryLabel)
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
-                                text = "${radarState.rssi} / ${radarState.peakRssi} dBm",
+                                text = rssiText,
                                 style = CliTypography.TelemetryValue,
-                                color = if (radarState.rssi >= -65) CliAccentGreen else if (radarState.rssi >= -78) CliAccent5GHz else CliAccent24GHz
+                                color = rssiColor
                             )
                         }
                     }
@@ -394,6 +451,7 @@ fun WifiRadarView(
             CliButton(
                 text = "RE-CALIBRATE BEARING",
                 variant = CliButtonVariant.Outlined,
+                enabled = isConnected && isShizukuReady && hasValidRssi,
                 onClick = onResetCalibration,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -432,8 +490,28 @@ private fun GuideToggleButton(
 }
 
 @Composable
-private fun VectorStatusBadge(radarState: RadarState) {
+private fun VectorStatusBadge(
+    radarState: RadarState,
+    isConnected: Boolean = true,
+    isShizukuReady: Boolean = true
+) {
     when {
+        !isConnected -> {
+            CliBadge(
+                text = "DISCONNECTED",
+                accentColor = CliTextTertiary,
+                backgroundColor = CliSurfaceElevated,
+                borderColor = CliBorderSubtle
+            )
+        }
+        !isShizukuReady -> {
+            CliBadge(
+                text = "SHIZUKU OFF",
+                accentColor = CliAccent24GHz,
+                backgroundColor = CliAccent24GHzBg,
+                borderColor = CliAccent24GHz.copy(alpha = 0.5f)
+            )
+        }
         radarState.isAlignedAhead -> {
             CliBadge(
                 text = "LOCKED AHEAD",
@@ -448,6 +526,14 @@ private fun VectorStatusBadge(radarState: RadarState) {
                 accentColor = CliAccent5GHz,
                 backgroundColor = CliAccent5GHzBg,
                 borderColor = CliAccent5GHz.copy(alpha = 0.5f)
+            )
+        }
+        radarState.rssi == 0 -> {
+            CliBadge(
+                text = "AWAITING SIGNAL",
+                accentColor = CliAccent24GHz,
+                backgroundColor = CliAccent24GHzBg,
+                borderColor = CliAccent24GHz.copy(alpha = 0.5f)
             )
         }
         else -> {

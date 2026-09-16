@@ -429,7 +429,10 @@ fun MainScreen(viewModel: MainViewModel) {
                                 RightPaneView.RADAR -> {
                                     WifiRadarView(
                                         radarEngine = radarEngine,
-                                        onResetCalibration = { radarEngine.resetCalibration() }
+                                        onResetCalibration = { radarEngine.resetCalibration() },
+                                        isConnected = wifiStatus.isConnected,
+                                        isShizukuReady = shizukuState.isPermissionGranted,
+                                        onOpenShizuku = { ShizukuManager.launchOrInstall(context) }
                                     )
                                 }
                             }
@@ -681,7 +684,10 @@ fun MainScreen(viewModel: MainViewModel) {
                             PhoneTab.RADAR -> {
                                 WifiRadarView(
                                     radarEngine = radarEngine,
-                                    onResetCalibration = { radarEngine.resetCalibration() }
+                                    onResetCalibration = { radarEngine.resetCalibration() },
+                                    isConnected = wifiStatus.isConnected,
+                                    isShizukuReady = shizukuState.isPermissionGranted,
+                                    onOpenShizuku = { ShizukuManager.launchOrInstall(context) }
                                 )
                             }
                         }
@@ -1014,7 +1020,7 @@ fun CliConnectedHeroPanel(
                 val bandColor = if (is5G) CliAccent5GHz else CliAccent24GHz
                 val bandBg = if (is5G) CliAccent5GHzBg else CliAccent24GHzBg
                 CliBadge(
-                    text = status.band.displayName,
+                    text = if (status.band != BandType.UNKNOWN) status.band.displayName else "WI-FI",
                     accentColor = bandColor,
                     backgroundColor = bandBg,
                     borderColor = bandColor.copy(alpha = 0.4f)
@@ -1033,7 +1039,8 @@ fun CliConnectedHeroPanel(
 
         // SSID Title
         Text(
-            text = if (status.isConnected) status.ssid
+            text = if (status.isConnected && status.ssid.isNotEmpty()) status.ssid
+                   else if (status.isConnected) "Wi-Fi Connected"
                    else if (isOperating) "Negotiating Band..."
                    else "Not Connected",
             style = Typography.headlineMedium,
@@ -1041,7 +1048,8 @@ fun CliConnectedHeroPanel(
         )
 
         Text(
-            text = if (status.isConnected) "IP: ${status.ipAddress}"
+            text = if (status.isConnected && status.ipAddress.isNotEmpty()) "IP: ${status.ipAddress}"
+                   else if (status.isConnected) "Connected • Start Shizuku for BSSID"
                    else if (isOperating) "Binding to target AP & verifying DHCP..."
                    else "Connect to Wi-Fi",
             style = CliTypography.CodeMono,
@@ -1175,7 +1183,7 @@ fun CliConnectedHeroPanel(
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = status.bssid,
+                        text = if (status.bssid.isNotEmpty()) status.bssid else "BSSID hidden (requires Shizuku)",
                         style = CliTypography.CodeMono,
                         color = CliTextSecondary
                     )
