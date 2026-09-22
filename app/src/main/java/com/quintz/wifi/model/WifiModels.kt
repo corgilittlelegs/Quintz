@@ -59,6 +59,13 @@ data class ShizukuState(
     val version: Int = 0
 )
 
+data class AdaptiveFallbackInfo(
+    val bssid: String = "",
+    val thresholdDbm: Int = -82,
+    val calibrationSamples: Int = 0,
+    val isCalibrated: Boolean = false
+)
+
 sealed class LockResult {
     open val isSuccess: Boolean get() = this is Success
 

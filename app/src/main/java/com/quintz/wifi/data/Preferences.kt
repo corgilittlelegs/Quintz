@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.quintz.wifi.model.AdaptiveFallbackInfo
 
 class Preferences(context: Context) {
 
@@ -51,6 +52,31 @@ class Preferences(context: Context) {
     var recoveryThresholdRssi: Int
         get() = prefs.getInt("recovery_threshold", -70)
         set(value) = prefs.edit().putInt("recovery_threshold", value).apply()
+
+    fun getAdaptiveFallbackInfo(): AdaptiveFallbackInfo = AdaptiveFallbackInfo(
+        bssid = prefs.getString("adaptive_fallback_bssid", "").orEmpty(),
+        thresholdDbm = prefs.getInt("adaptive_fallback_threshold", fallbackThresholdRssi),
+        calibrationSamples = prefs.getInt("adaptive_fallback_samples", 0),
+        isCalibrated = prefs.getBoolean("adaptive_fallback_calibrated", false)
+    )
+
+    fun saveAdaptiveFallbackInfo(info: AdaptiveFallbackInfo) {
+        prefs.edit()
+            .putString("adaptive_fallback_bssid", info.bssid)
+            .putInt("adaptive_fallback_threshold", info.thresholdDbm)
+            .putInt("adaptive_fallback_samples", info.calibrationSamples)
+            .putBoolean("adaptive_fallback_calibrated", info.isCalibrated)
+            .apply()
+    }
+
+    fun clearAdaptiveFallbackInfo() {
+        prefs.edit()
+            .remove("adaptive_fallback_bssid")
+            .remove("adaptive_fallback_threshold")
+            .remove("adaptive_fallback_samples")
+            .remove("adaptive_fallback_calibrated")
+            .apply()
+    }
 
     var isQuickTileAdded: Boolean
         get() = prefs.getBoolean("quick_tile_added", false)

@@ -14,6 +14,7 @@ import androidx.core.app.ServiceCompat
 import com.quintz.wifi.R
 import com.quintz.wifi.core.WifiController
 import com.quintz.wifi.data.Preferences
+import com.quintz.wifi.model.AdaptiveFallbackInfo
 import com.quintz.wifi.model.BandType
 import com.quintz.wifi.model.LockResult
 import com.quintz.wifi.shizuku.ShizukuManager
@@ -88,6 +89,14 @@ class WatchdogService : Service() {
                                     linkSpeedMbps = status.linkSpeedMbps,
                                     configuredThreshold = prefs.fallbackThresholdRssi
                                 )
+                                prefs.saveAdaptiveFallbackInfo(
+                                    AdaptiveFallbackInfo(
+                                        bssid = status.bssid,
+                                        thresholdDbm = adaptiveSignal.rssiThreshold,
+                                        calibrationSamples = adaptiveSignal.calibrationSamples,
+                                        isCalibrated = adaptiveSignal.isCalibrated
+                                    )
+                                )
                                 val weakSignal = status.rssi < adaptiveSignal.rssiThreshold && status.rssi > -120
                                 val mustFallbackForSafety = status.rssi < HARD_RSSI_FLOOR_DBM
                                 val poorLinkQuality = !adaptiveSignal.isCalibrated ||
@@ -121,6 +130,7 @@ class WatchdogService : Service() {
                             } else if (prefs.lastTargetBand == "5GHz") {
                                 consecutiveLowSignalSamples = 0
                                 adaptiveSignalTracker.reset()
+                                prefs.clearAdaptiveFallbackInfo()
                                 // In fallback mode: scan to check if 5 GHz is strong again
                                 loopDelay = fallbackScanInterval
                                 val radios = controller.scanRadios()
@@ -148,12 +158,14 @@ class WatchdogService : Service() {
                             } else {
                                 consecutiveLowSignalSamples = 0
                                 adaptiveSignalTracker.reset()
+                                prefs.clearAdaptiveFallbackInfo()
                                 fallbackScanInterval = 12000L
                                 updateNotification("Auto-Roam • ${status.ssid}")
                             }
                         } else {
                             consecutiveLowSignalSamples = 0
                             adaptiveSignalTracker.reset()
+                            prefs.clearAdaptiveFallbackInfo()
                             consecutiveDisconnectedSamples++
                             // A shell/status query can transiently report no connection while
                             // Android is still connected. Require a second observation before
@@ -276,6 +288,7 @@ private class AdaptiveSignalTracker {
 
         return AdaptiveSignalSnapshot(
             rssiThreshold = threshold,
+            calibrationSamples = healthyRssiSamples.size,
             isCalibrated = isCalibrated,
             healthyLinkSpeedMbps = if (healthyLinkSpeedSamples.size >= MIN_CALIBRATION_SAMPLES) {
                 median(healthyLinkSpeedSamples)
@@ -311,6 +324,7 @@ private class AdaptiveSignalTracker {
 
 private data class AdaptiveSignalSnapshot(
     val rssiThreshold: Int,
+    val calibrationSamples: Int,
     val isCalibrated: Boolean,
     val healthyLinkSpeedMbps: Int?
 ) {

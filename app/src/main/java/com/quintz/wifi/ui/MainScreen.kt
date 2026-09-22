@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.quintz.wifi.model.AccessPointRadio
+import com.quintz.wifi.model.AdaptiveFallbackInfo
 import com.quintz.wifi.model.BandType
 import com.quintz.wifi.model.ShizukuState
 import com.quintz.wifi.model.WifiStatus
@@ -69,6 +70,7 @@ fun MainScreen(viewModel: MainViewModel) {
     val isScanning by viewModel.isScanning.collectAsState()
     val message by viewModel.message.collectAsState()
     val watchdogActive by viewModel.watchdogActive.collectAsState()
+    val adaptiveFallbackInfo by viewModel.adaptiveFallbackInfo.collectAsState()
     val isTileAdded by viewModel.isTileAdded.collectAsState()
 
     var showPasswordDialog by remember { mutableStateOf(false) }
@@ -260,6 +262,8 @@ fun MainScreen(viewModel: MainViewModel) {
 
                         CliWatchdogPanel(
                             isActive = watchdogActive,
+                            status = wifiStatus,
+                            adaptiveFallbackInfo = adaptiveFallbackInfo,
                             onToggle = { viewModel.toggleWatchdog(it) }
                         )
 
@@ -560,6 +564,8 @@ fun MainScreen(viewModel: MainViewModel) {
 
                                     CliWatchdogPanel(
                                         isActive = watchdogActive,
+                                        status = wifiStatus,
+                                        adaptiveFallbackInfo = adaptiveFallbackInfo,
                                         onToggle = { viewModel.toggleWatchdog(it) }
                                     )
 
@@ -1270,6 +1276,8 @@ fun CliTelemetryMetric(
 @Composable
 fun CliWatchdogPanel(
     isActive: Boolean,
+    status: WifiStatus,
+    adaptiveFallbackInfo: AdaptiveFallbackInfo,
     onToggle: (Boolean) -> Unit
 ) {
     CliPanel(
@@ -1291,6 +1299,25 @@ fun CliWatchdogPanel(
                     text = "Learns your 5 GHz baseline, then auto-unlocks only after sustained weak signal and poor link quality.",
                     style = Typography.bodyMedium,
                     color = CliTextSecondary
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                val isCurrentBssid = status.isLockedToBssid &&
+                    (status.band == BandType.BAND_5_GHZ || status.band == BandType.BAND_6_GHZ) &&
+                    status.bssid.isNotEmpty() &&
+                    status.bssid.equals(adaptiveFallbackInfo.bssid, ignoreCase = true)
+                val fallbackStatus = when {
+                    !isActive -> "FALLBACK MONITORING DISABLED"
+                    !isCurrentBssid -> "LOCK A 5 GHz BSSID TO CALIBRATE"
+                    adaptiveFallbackInfo.isCalibrated ->
+                        "ADAPTIVE FALLBACK: ${adaptiveFallbackInfo.thresholdDbm} dBm"
+                    else ->
+                        "CALIBRATING ${adaptiveFallbackInfo.calibrationSamples}/6 • CURRENT: ${adaptiveFallbackInfo.thresholdDbm} dBm"
+                }
+                Text(
+                    text = fallbackStatus,
+                    style = CliTypography.CodeMono,
+                    color = if (adaptiveFallbackInfo.isCalibrated && isCurrentBssid) CliAccent5GHz else CliTextTertiary,
+                    fontSize = 11.sp
                 )
             }
             Spacer(modifier = Modifier.width(16.dp))

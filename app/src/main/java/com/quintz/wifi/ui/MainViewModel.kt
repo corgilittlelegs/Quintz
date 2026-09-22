@@ -14,6 +14,7 @@ import com.quintz.wifi.R
 import com.quintz.wifi.core.WifiController
 import com.quintz.wifi.data.Preferences
 import com.quintz.wifi.model.AccessPointRadio
+import com.quintz.wifi.model.AdaptiveFallbackInfo
 import com.quintz.wifi.model.BandType
 import com.quintz.wifi.model.LockResult
 import com.quintz.wifi.model.ShizukuState
@@ -51,6 +52,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _watchdogActive = MutableStateFlow(prefs.isWatchdogEnabled)
     val watchdogActive: StateFlow<Boolean> = _watchdogActive.asStateFlow()
 
+    private val _adaptiveFallbackInfo = MutableStateFlow(prefs.getAdaptiveFallbackInfo())
+    val adaptiveFallbackInfo: StateFlow<AdaptiveFallbackInfo> = _adaptiveFallbackInfo.asStateFlow()
+
     private val _isTileAdded = MutableStateFlow(prefs.isQuickTileAdded)
     val isTileAdded: StateFlow<Boolean> = _isTileAdded.asStateFlow()
 
@@ -82,6 +86,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 viewModelScope.launch {
                     if (!controller.isOperating.value) {
                         controller.refreshStatus()
+                        refreshAdaptiveFallbackInfo()
                     }
                 }
             }
@@ -110,6 +115,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Immediately perform initial native Wi-Fi refresh on launch
         viewModelScope.launch {
             controller.refreshStatus()
+            refreshAdaptiveFallbackInfo()
         }
 
         viewModelScope.launch {
@@ -169,6 +175,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 while (isActive) {
                     if (!controller.isOperating.value) {
                         controller.refreshStatus()
+                        refreshAdaptiveFallbackInfo()
                     }
                     delay(2500)
                 }
@@ -243,6 +250,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshAll() {
         viewModelScope.launch {
             controller.refreshStatus()
+            refreshAdaptiveFallbackInfo()
             if (ShizukuManager.isReady()) {
                 controller.scanRadios()
             }
@@ -340,6 +348,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val context = getApplication<Application>()
         val intent = Intent(context, WatchdogService::class.java)
         if (enabled) {
+            prefs.clearAdaptiveFallbackInfo()
+            refreshAdaptiveFallbackInfo()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
@@ -348,8 +358,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _message.value = "Watchdog active: Auto-fallback enabled"
         } else {
             context.stopService(intent)
+            prefs.clearAdaptiveFallbackInfo()
+            refreshAdaptiveFallbackInfo()
             _message.value = "Watchdog disabled"
         }
+    }
+
+    private fun refreshAdaptiveFallbackInfo() {
+        _adaptiveFallbackInfo.value = prefs.getAdaptiveFallbackInfo()
     }
 
     fun clearMessage() {
