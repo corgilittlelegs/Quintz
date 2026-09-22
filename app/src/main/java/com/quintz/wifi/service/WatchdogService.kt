@@ -65,12 +65,15 @@ class WatchdogService : Service() {
         scope.launch {
             var fallbackScanInterval = 12000L
             var lastKnownSsid = ""
+            var consecutiveLowSignalSamples = 0
+            var consecutiveDisconnectedSamples = 0
             while (isActive) {
                 var loopDelay = 15000L
                 if (prefs.isWatchdogEnabled && ShizukuManager.isReady()) {
                     try {
                         val status = controller.refreshStatus()
                         if (status.isConnected && status.ssid.isNotEmpty()) {
+                            consecutiveDisconnectedSamples = 0
                             lastKnownSsid = status.ssid
                             val savedPassword = prefs.getPassword(status.ssid)
 
@@ -78,14 +81,29 @@ class WatchdogService : Service() {
                                 // Passive RSSI check: no active radio scan needed when healthy on 5 GHz
                                 fallbackScanInterval = 12000L
                                 if (status.rssi < prefs.fallbackThresholdRssi && status.rssi > -120) {
-                                    // Fallback to auto to preserve internet
-                                    updateNotification("Low 5 GHz signal (${status.rssi} dBm). Falling back to Auto...")
-                                    controller.unlockToAuto(status.ssid, savedPassword)
-                                    loopDelay = 8000L
+                                    // RSSI can briefly dip during normal roaming. Require sustained
+                                    // low signal before tearing down the BSSID-bound connection.
+                                    consecutiveLowSignalSamples++
+                                    if (consecutiveLowSignalSamples >= LOW_SIGNAL_SAMPLES_BEFORE_FALLBACK) {
+                                        updateNotification("Low 5 GHz signal (${status.rssi} dBm). Falling back to Auto...")
+                                        controller.unlockToAuto(
+                                            status.ssid,
+                                            savedPassword,
+                                            preserveTargetBand = true
+                                        )
+                                        consecutiveLowSignalSamples = 0
+                                        loopDelay = 8000L
+                                    } else {
+                                        updateNotification(
+                                            "Weak 5 GHz signal (${status.rssi} dBm). Confirming before fallback..."
+                                        )
+                                    }
                                 } else {
+                                    consecutiveLowSignalSamples = 0
                                     updateNotification("Locked to 5 GHz • ${status.ssid} (${status.rssi} dBm)")
                                 }
                             } else if (prefs.lastTargetBand == "5GHz") {
+                                consecutiveLowSignalSamples = 0
                                 // In fallback mode: scan to check if 5 GHz is strong again
                                 loopDelay = fallbackScanInterval
                                 val radios = controller.scanRadios()
@@ -111,18 +129,31 @@ class WatchdogService : Service() {
                                     fallbackScanInterval = (fallbackScanInterval + 4000L).coerceAtMost(30000L)
                                 }
                             } else {
+                                consecutiveLowSignalSamples = 0
                                 fallbackScanInterval = 12000L
                                 updateNotification("Auto-Roam • ${status.ssid}")
                             }
                         } else {
-                            // Connection lost / disconnected
-                            if (lastKnownSsid.isNotEmpty() && prefs.lastTargetBand == "5GHz") {
+                            consecutiveLowSignalSamples = 0
+                            consecutiveDisconnectedSamples++
+                            // A shell/status query can transiently report no connection while
+                            // Android is still connected. Require a second observation before
+                            // reconfiguring the network and causing a visible handoff.
+                            if (lastKnownSsid.isNotEmpty() &&
+                                prefs.lastTargetBand == "5GHz" &&
+                                consecutiveDisconnectedSamples >= DISCONNECTED_SAMPLES_BEFORE_RECOVERY
+                            ) {
                                 val savedPassword = prefs.getPassword(lastKnownSsid)
                                 updateNotification("5 GHz lost. Unlocking to Auto to restore connection...")
-                                controller.unlockToAuto(lastKnownSsid, savedPassword)
+                                controller.unlockToAuto(
+                                    lastKnownSsid,
+                                    savedPassword,
+                                    preserveTargetBand = true
+                                )
+                                consecutiveDisconnectedSamples = 0
                                 loopDelay = 6000L
                             } else {
-                                updateNotification("Wi-Fi disconnected • Monitoring...")
+                                updateNotification("Wi-Fi connection lost. Confirming before recovery...")
                             }
                         }
                     } catch (e: Exception) {
@@ -179,5 +210,7 @@ class WatchdogService : Service() {
     companion object {
         private const val CHANNEL_ID = "watchdog_channel"
         private const val NOTIFICATION_ID = 4001
+        private const val LOW_SIGNAL_SAMPLES_BEFORE_FALLBACK = 3
+        private const val DISCONNECTED_SAMPLES_BEFORE_RECOVERY = 2
     }
 }

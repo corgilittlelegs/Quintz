@@ -1288,7 +1288,7 @@ fun CliWatchdogPanel(
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Auto-unlocks to 2.4 GHz if 5 GHz signal drops below -82 dBm to safeguard internet access.",
+                    text = "Auto-unlocks to 2.4 GHz only after sustained 5 GHz signal below -82 dBm to safeguard internet access.",
                     style = Typography.bodyMedium,
                     color = CliTextSecondary
                 )

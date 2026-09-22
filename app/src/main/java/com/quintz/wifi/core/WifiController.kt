@@ -285,7 +285,8 @@ class WifiController(private val context: Context) {
     suspend fun unlockToAuto(
         ssid: String,
         passphrase: String? = null,
-        securityType: String = ""
+        securityType: String = "",
+        preserveTargetBand: Boolean = false
     ): Boolean = withContext(Dispatchers.IO) {
         if (!ShizukuManager.isReady()) return@withContext false
 
@@ -295,7 +296,12 @@ class WifiController(private val context: Context) {
             val sec = if (securityType.isNotEmpty()) securityType else detectSecurityType(ssid, "")
             val isOpen = sec == "open" || sec == "owe"
 
-            prefs.lastTargetBand = "Auto"
+            // A manual unlock ends the user's 5 GHz preference. The watchdog uses
+            // preserveTargetBand for a temporary safety fallback so it can recover
+            // the lock once the signal is strong again.
+            if (!preserveTargetBand) {
+                prefs.lastTargetBand = "Auto"
+            }
 
             val escapedSsid = ShizukuManager.escapeShellArg(ssid)
             val escapedSec = ShizukuManager.escapeShellArg(sec)
@@ -415,4 +421,3 @@ class WifiController(private val context: Context) {
         }
     }
 }
-

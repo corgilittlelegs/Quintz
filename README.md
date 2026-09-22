@@ -42,7 +42,7 @@ Quintz leverages the **[Shizuku](https://shizuku.rikka.app)** privileged API bri
 
 ### 🛡️ Smart Fallback Watchdog
 - Low-power foreground service continuously tracks live RSSI signal quality.
-- **Auto-Unlock**: If you walk into a dead zone where 5 GHz signal drops below `-82 dBm`, the watchdog automatically unlocks the connection to Auto-Roam mode so you never lose internet.
+- **Auto-Unlock**: If you walk into a dead zone where 5 GHz signal remains below `-82 dBm`, the watchdog automatically unlocks the connection to Auto-Roam mode so you never lose internet.
 - **Auto-Recovery**: Once you return to an area with strong 5 GHz reception (`≥ -72 dBm`), the watchdog seamlessly re-locks to 5 GHz.
 - Built with progressive scan backoff (12s → 30s) to minimize battery impact.
 
