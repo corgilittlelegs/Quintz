@@ -1337,16 +1337,9 @@ fun CliWatchdogPanel(
                 )
             }
             Spacer(modifier = Modifier.width(16.dp))
-            Switch(
+            CliSwitch(
                 checked = isActive,
-                onCheckedChange = onToggle,
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = CliButtonPrimary,
-                    checkedTrackColor = CliAccent5GHz,
-                    uncheckedThumbColor = CliTextTertiary,
-                    uncheckedTrackColor = CliSurfaceElevated,
-                    uncheckedBorderColor = CliBorder
-                )
+                onCheckedChange = onToggle
             )
         }
     }

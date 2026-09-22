@@ -325,3 +325,70 @@ fun CliFilterChip(
         )
     }
 }
+
+/**
+ * Minimalist Industrial CLI Switch / Toggle.
+ * Replaces generic rounded Material switches with a sharp, high-contrast, tactile mechanical toggle.
+ */
+@Composable
+fun CliSwitch(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true
+) {
+    val haptic = LocalHapticFeedback.current
+    val thumbOffset by animateDpAsState(
+        targetValue = if (checked) 23.dp else 3.dp,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "CliSwitchThumbOffset"
+    )
+
+    val trackBorderColor = when {
+        !enabled -> CliBorderSubtle
+        checked -> CliAccent5GHz.copy(alpha = 0.6f)
+        else -> CliBorder
+    }
+
+    val trackBgColor = when {
+        !enabled -> CliSurface
+        checked -> CliAccent5GHzBg
+        else -> CliSurfaceElevated
+    }
+
+    val thumbColor = when {
+        !enabled -> CliBorder
+        checked -> CliButtonPrimary
+        else -> CliTextTertiary
+    }
+
+    Box(
+        modifier = modifier
+            .size(width = 44.dp, height = 24.dp)
+            .clip(RoundedCornerShape(4.dp))
+            .background(trackBgColor)
+            .border(1.dp, trackBorderColor, RoundedCornerShape(4.dp))
+            .clickable(
+                enabled = enabled,
+                role = androidx.compose.ui.semantics.Role.Switch,
+                onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onCheckedChange(!checked)
+                }
+            )
+            .padding(vertical = 3.dp),
+        contentAlignment = Alignment.CenterStart
+    ) {
+        Box(
+            modifier = Modifier
+                .offset(x = thumbOffset)
+                .size(width = 18.dp, height = 18.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(thumbColor)
+        )
+    }
+}
+
