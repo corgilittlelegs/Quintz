@@ -211,7 +211,11 @@ class WifiController(private val context: Context) {
             val isOpen = sec == "open" || sec == "owe"
             val pass = if (passphrase.isNotEmpty()) passphrase else prefs.getPassword(ssid).orEmpty()
 
-            if (!isOpen && pass.isNotEmpty()) {
+            if (!isOpen && pass.isEmpty()) {
+                return@withContext LockResult.CommandFailed("Passphrase required for secured network \"$ssid\"")
+            }
+
+            if (!isOpen) {
                 prefs.savePassword(ssid, pass)
             }
             prefs.lastTargetBand = "5GHz"
@@ -219,25 +223,21 @@ class WifiController(private val context: Context) {
             val escapedSsid = ShizukuManager.escapeShellArg(ssid)
             val escapedBssid = ShizukuManager.escapeShellArg(bssid)
             val escapedSec = ShizukuManager.escapeShellArg(sec)
-            val escapedPass = if (!isOpen && pass.isNotEmpty()) ShizukuManager.escapeShellArg(pass) else null
+            val escapedPass = if (!isOpen) ShizukuManager.escapeShellArg(pass) else null
 
             // 1. Update the saved network profile in WifiConfigStore to lock the BSSID
             val addCmd = if (isOpen) {
                 "cmd wifi add-network $escapedSsid $escapedSec -b $escapedBssid"
-            } else if (escapedPass != null) {
-                "cmd wifi add-network $escapedSsid $escapedSec $escapedPass -b $escapedBssid"
             } else {
-                "cmd wifi add-network $escapedSsid $escapedSec -b $escapedBssid"
+                "cmd wifi add-network $escapedSsid $escapedSec $escapedPass -b $escapedBssid"
             }
             ShizukuManager.exec(addCmd)
 
             // 2. Request connection to the target network and BSSID
             val connectCmd = if (isOpen) {
                 "cmd wifi connect-network $escapedSsid $escapedSec -b $escapedBssid"
-            } else if (escapedPass != null) {
-                "cmd wifi connect-network $escapedSsid $escapedSec $escapedPass -b $escapedBssid"
             } else {
-                "cmd wifi connect-network $escapedSsid $escapedSec -b $escapedBssid"
+                "cmd wifi connect-network $escapedSsid $escapedSec $escapedPass -b $escapedBssid"
             }
             val result = ShizukuManager.exec(connectCmd)
 

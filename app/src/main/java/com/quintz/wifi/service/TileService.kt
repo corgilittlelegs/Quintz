@@ -96,36 +96,59 @@ class TileService : android.service.quicksettings.TileService() {
                     }
                 } else {
                     // Auto mode -> Lock to 5 GHz
-                    withContext(Dispatchers.Main) {
-                        tile.state = Tile.STATE_ACTIVE
-                        tile.label = "Quintz"
-                        tile.subtitle = "Locking to 5 GHz..."
-                        tile.updateTile()
-                        Toast.makeText(this@TileService, "Quintz: Locking to 5 GHz...", Toast.LENGTH_SHORT).show()
-                    }
-                    val result = controller.autoSelectAndLock5Ghz(current.ssid, password.orEmpty())
-                    withContext(Dispatchers.Main) {
-                        when (result) {
-                            is LockResult.Success -> {
-                                Toast.makeText(this@TileService, "Quintz: Successfully locked to 5 GHz", Toast.LENGTH_SHORT).show()
-                            }
-                            is LockResult.No5GhzRadioFound -> {
-                                Toast.makeText(this@TileService, "Quintz: No 5 GHz radio found for ${current.ssid}", Toast.LENGTH_SHORT).show()
-                            }
-                            is LockResult.ShizukuNotReady -> {
-                                Toast.makeText(this@TileService, "Quintz: Shizuku is not running", Toast.LENGTH_SHORT).show()
-                            }
-                            is LockResult.AssociationFailed -> {
-                                val msg = if (result.actualBssid != null) {
-                                    "Quintz: Failed to bind to 5 GHz (stayed on ${result.actualBssid})"
-                                } else {
-                                    "Quintz: Failed to bind to 5 GHz AP"
+                    val isConnectedOpen = current.securityType == "0" || current.securityType == "open"
+                    if (!password.isNullOrEmpty() || isConnectedOpen) {
+                        withContext(Dispatchers.Main) {
+                            tile.state = Tile.STATE_ACTIVE
+                            tile.label = "Quintz"
+                            tile.subtitle = "Locking to 5 GHz..."
+                            tile.updateTile()
+                            Toast.makeText(this@TileService, "Quintz: Locking to 5 GHz...", Toast.LENGTH_SHORT).show()
+                        }
+                        val result = controller.autoSelectAndLock5Ghz(current.ssid, password.orEmpty())
+                        withContext(Dispatchers.Main) {
+                            when (result) {
+                                is LockResult.Success -> {
+                                    Toast.makeText(this@TileService, "Quintz: Successfully locked to 5 GHz", Toast.LENGTH_SHORT).show()
                                 }
-                                Toast.makeText(this@TileService, msg, Toast.LENGTH_SHORT).show()
+                                is LockResult.No5GhzRadioFound -> {
+                                    Toast.makeText(this@TileService, "Quintz: No 5 GHz radio found for ${current.ssid}", Toast.LENGTH_SHORT).show()
+                                }
+                                is LockResult.ShizukuNotReady -> {
+                                    Toast.makeText(this@TileService, "Quintz: Shizuku is not running", Toast.LENGTH_SHORT).show()
+                                }
+                                is LockResult.AssociationFailed -> {
+                                    val msg = if (result.actualBssid != null) {
+                                        "Quintz: Failed to bind to 5 GHz (stayed on ${result.actualBssid})"
+                                    } else {
+                                        "Quintz: Failed to bind to 5 GHz AP"
+                                    }
+                                    Toast.makeText(this@TileService, msg, Toast.LENGTH_SHORT).show()
+                                }
+                                is LockResult.CommandFailed -> {
+                                    Toast.makeText(this@TileService, "Quintz: ${result.reason}", Toast.LENGTH_SHORT).show()
+                                }
                             }
-                            is LockResult.CommandFailed -> {
-                                Toast.makeText(this@TileService, "Quintz: Lock command failed", Toast.LENGTH_SHORT).show()
-                            }
+                        }
+                    } else {
+                        // Password not saved! Open app so user can input it
+                        withContext(Dispatchers.Main) {
+                            tile.subtitle = "Password needed"
+                            tile.updateTile()
+                            Toast.makeText(this@TileService, "Quintz: Open app to save Wi-Fi password first", Toast.LENGTH_LONG).show()
+                        }
+                        val appIntent = Intent(this@TileService, MainActivity::class.java).apply {
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                        }
+                        if (Build.VERSION.SDK_INT >= 34) {
+                            val pendingIntent = PendingIntent.getActivity(
+                                this@TileService, 0, appIntent,
+                                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                            )
+                            startActivityAndCollapse(pendingIntent)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            startActivityAndCollapse(appIntent)
                         }
                     }
                 }

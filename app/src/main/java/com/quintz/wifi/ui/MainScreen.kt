@@ -244,7 +244,15 @@ fun MainScreen(viewModel: MainViewModel) {
                                     viewModel.unlockToAuto()
                                 } else {
                                     val saved = viewModel.getSavedPassword(wifiStatus.ssid)
-                                    viewModel.forceLock5Ghz(saved)
+                                    val isCurrentOpen = wifiStatus.securityType == "0" || wifiStatus.securityType == "open"
+                                    if (saved.isNotEmpty() || isCurrentOpen) {
+                                        viewModel.forceLock5Ghz(saved)
+                                    } else {
+                                        targetRadioForPassword = null
+                                        passwordInput = ""
+                                        passwordVisible = false
+                                        showPasswordDialog = true
+                                    }
                                 }
                             },
                             onOpenRadar = { selectedRightPane = RightPaneView.RADAR }
@@ -399,9 +407,8 @@ fun MainScreen(viewModel: MainViewModel) {
                                                             !it.contains("PSK") && !it.contains("SAE") && !it.contains("WEP")
                                                         }
                                                         val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
-                                                        val isConnectedSsid = wifiStatus.isConnected && targetSsid.trim('"').equals(wifiStatus.ssid.trim('"'), ignoreCase = true)
                                                         val saved = viewModel.getSavedPassword(targetSsid)
-                                                        if (isOpen || isConnectedSsid || saved.isNotEmpty()) {
+                                                        if (isOpen || saved.isNotEmpty()) {
                                                             viewModel.lockToSpecificRadio(radio, saved)
                                                         } else {
                                                             targetRadioForPassword = radio
@@ -537,7 +544,15 @@ fun MainScreen(viewModel: MainViewModel) {
                                                 viewModel.unlockToAuto()
                                             } else {
                                                 val saved = viewModel.getSavedPassword(wifiStatus.ssid)
-                                                viewModel.forceLock5Ghz(saved)
+                                                val isCurrentOpen = wifiStatus.securityType == "0" || wifiStatus.securityType == "open"
+                                                if (saved.isNotEmpty() || isCurrentOpen) {
+                                                    viewModel.forceLock5Ghz(saved)
+                                                } else {
+                                                    targetRadioForPassword = null
+                                                    passwordInput = ""
+                                                    passwordVisible = false
+                                                    showPasswordDialog = true
+                                                }
                                             }
                                         },
                                         onOpenRadar = { selectedPhoneTab = PhoneTab.RADAR }
@@ -644,9 +659,8 @@ fun MainScreen(viewModel: MainViewModel) {
                                                             !it.contains("PSK") && !it.contains("SAE") && !it.contains("WEP")
                                                         }
                                                         val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
-                                                        val isConnectedSsid = wifiStatus.isConnected && targetSsid.trim('"').equals(wifiStatus.ssid.trim('"'), ignoreCase = true)
                                                         val saved = viewModel.getSavedPassword(targetSsid)
-                                                        if (isOpen || isConnectedSsid || saved.isNotEmpty()) {
+                                                        if (isOpen || saved.isNotEmpty()) {
                                                             viewModel.lockToSpecificRadio(radio, saved)
                                                         } else {
                                                             targetRadioForPassword = radio
