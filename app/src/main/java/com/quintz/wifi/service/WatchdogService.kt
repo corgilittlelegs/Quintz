@@ -24,6 +24,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.ArrayDeque
 
 class WatchdogService : Service() {
 
@@ -32,6 +33,7 @@ class WatchdogService : Service() {
 
     private lateinit var controller: WifiController
     private lateinit var prefs: Preferences
+    private val adaptiveSignalTracker = AdaptiveSignalTracker()
 
     override fun onCreate() {
         super.onCreate()
@@ -80,12 +82,26 @@ class WatchdogService : Service() {
                             if (status.isLockedToBssid && (status.band == BandType.BAND_5_GHZ || status.band == BandType.BAND_6_GHZ)) {
                                 // Passive RSSI check: no active radio scan needed when healthy on 5 GHz
                                 fallbackScanInterval = 12000L
-                                if (status.rssi < prefs.fallbackThresholdRssi && status.rssi > -120) {
+                                val adaptiveSignal = adaptiveSignalTracker.observe(
+                                    bssid = status.bssid,
+                                    rssi = status.rssi,
+                                    linkSpeedMbps = status.linkSpeedMbps,
+                                    configuredThreshold = prefs.fallbackThresholdRssi
+                                )
+                                val weakSignal = status.rssi < adaptiveSignal.rssiThreshold && status.rssi > -120
+                                val mustFallbackForSafety = status.rssi < HARD_RSSI_FLOOR_DBM
+                                val poorLinkQuality = !adaptiveSignal.isCalibrated ||
+                                    !adaptiveSignal.hasLinkSpeedBaseline ||
+                                    adaptiveSignal.isLinkSpeedDegraded(status.linkSpeedMbps)
+
+                                if (weakSignal && (poorLinkQuality || mustFallbackForSafety)) {
                                     // RSSI can briefly dip during normal roaming. Require sustained
-                                    // low signal before tearing down the BSSID-bound connection.
+                                    // low signal and poor link quality before tearing down the BSSID-bound connection.
                                     consecutiveLowSignalSamples++
                                     if (consecutiveLowSignalSamples >= LOW_SIGNAL_SAMPLES_BEFORE_FALLBACK) {
-                                        updateNotification("Low 5 GHz signal (${status.rssi} dBm). Falling back to Auto...")
+                                        updateNotification(
+                                            "Low 5 GHz signal (${status.rssi} dBm, floor ${adaptiveSignal.rssiThreshold} dBm). Falling back to Auto..."
+                                        )
                                         controller.unlockToAuto(
                                             status.ssid,
                                             savedPassword,
@@ -95,7 +111,7 @@ class WatchdogService : Service() {
                                         loopDelay = 8000L
                                     } else {
                                         updateNotification(
-                                            "Weak 5 GHz signal (${status.rssi} dBm). Confirming before fallback..."
+                                            "Weak 5 GHz signal (${status.rssi} dBm, floor ${adaptiveSignal.rssiThreshold} dBm). Confirming before fallback..."
                                         )
                                     }
                                 } else {
@@ -104,6 +120,7 @@ class WatchdogService : Service() {
                                 }
                             } else if (prefs.lastTargetBand == "5GHz") {
                                 consecutiveLowSignalSamples = 0
+                                adaptiveSignalTracker.reset()
                                 // In fallback mode: scan to check if 5 GHz is strong again
                                 loopDelay = fallbackScanInterval
                                 val radios = controller.scanRadios()
@@ -130,11 +147,13 @@ class WatchdogService : Service() {
                                 }
                             } else {
                                 consecutiveLowSignalSamples = 0
+                                adaptiveSignalTracker.reset()
                                 fallbackScanInterval = 12000L
                                 updateNotification("Auto-Roam • ${status.ssid}")
                             }
                         } else {
                             consecutiveLowSignalSamples = 0
+                            adaptiveSignalTracker.reset()
                             consecutiveDisconnectedSamples++
                             // A shell/status query can transiently report no connection while
                             // Android is still connected. Require a second observation before
@@ -212,5 +231,93 @@ class WatchdogService : Service() {
         private const val NOTIFICATION_ID = 4001
         private const val LOW_SIGNAL_SAMPLES_BEFORE_FALLBACK = 3
         private const val DISCONNECTED_SAMPLES_BEFORE_RECOVERY = 2
+        private const val HARD_RSSI_FLOOR_DBM = -90
+    }
+}
+
+private class AdaptiveSignalTracker {
+    private var trackedBssid = ""
+    private val healthyRssiSamples = ArrayDeque<Int>()
+    private val healthyLinkSpeedSamples = ArrayDeque<Int>()
+
+    fun observe(
+        bssid: String,
+        rssi: Int,
+        linkSpeedMbps: Int,
+        configuredThreshold: Int
+    ): AdaptiveSignalSnapshot {
+        val safeConfiguredThreshold = configuredThreshold.coerceAtLeast(HARD_RSSI_FLOOR_DBM)
+        if (bssid.isEmpty() || !bssid.equals(trackedBssid, ignoreCase = true)) {
+            reset()
+            trackedBssid = bssid
+        }
+
+        // Only learn from readings that are already above the normal fallback
+        // threshold. This prevents a brief weak-signal period from lowering its
+        // own future fallback floor.
+        if (rssi in safeConfiguredThreshold..-1) {
+            addBounded(healthyRssiSamples, rssi)
+            if (linkSpeedMbps > 0) {
+                addBounded(healthyLinkSpeedSamples, linkSpeedMbps)
+            }
+        }
+
+        val isCalibrated = healthyRssiSamples.size >= MIN_CALIBRATION_SAMPLES
+        val threshold = if (isCalibrated) {
+            // Adapt only toward a lower (less aggressive) fallback point. -90 dBm
+            // remains an absolute safety floor regardless of the learned baseline.
+            (median(healthyRssiSamples) - RSSI_DROP_FROM_HEALTHY_BASELINE_DB).coerceIn(
+                HARD_RSSI_FLOOR_DBM,
+                safeConfiguredThreshold
+            )
+        } else {
+            safeConfiguredThreshold
+        }
+
+        return AdaptiveSignalSnapshot(
+            rssiThreshold = threshold,
+            isCalibrated = isCalibrated,
+            healthyLinkSpeedMbps = if (healthyLinkSpeedSamples.size >= MIN_CALIBRATION_SAMPLES) {
+                median(healthyLinkSpeedSamples)
+            } else {
+                null
+            }
+        )
+    }
+
+    fun reset() {
+        trackedBssid = ""
+        healthyRssiSamples.clear()
+        healthyLinkSpeedSamples.clear()
+    }
+
+    private fun addBounded(samples: ArrayDeque<Int>, value: Int) {
+        if (samples.size == MAX_CALIBRATION_SAMPLES) samples.removeFirst()
+        samples.addLast(value)
+    }
+
+    private fun median(samples: Collection<Int>): Int {
+        val sorted = samples.sorted()
+        return sorted[sorted.size / 2]
+    }
+
+    private companion object {
+        const val HARD_RSSI_FLOOR_DBM = -90
+        const val MIN_CALIBRATION_SAMPLES = 6
+        const val MAX_CALIBRATION_SAMPLES = 8
+        const val RSSI_DROP_FROM_HEALTHY_BASELINE_DB = 20
+    }
+}
+
+private data class AdaptiveSignalSnapshot(
+    val rssiThreshold: Int,
+    val isCalibrated: Boolean,
+    val healthyLinkSpeedMbps: Int?
+) {
+    val hasLinkSpeedBaseline: Boolean get() = healthyLinkSpeedMbps != null
+
+    fun isLinkSpeedDegraded(currentLinkSpeedMbps: Int): Boolean {
+        val baseline = healthyLinkSpeedMbps ?: return false
+        return currentLinkSpeedMbps > 0 && currentLinkSpeedMbps * 100 <= baseline * 35
     }
 }
