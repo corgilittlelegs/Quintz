@@ -58,3 +58,17 @@ data class ShizukuState(
     val isPermissionGranted: Boolean = false,
     val version: Int = 0
 )
+
+sealed class LockResult {
+    open val isSuccess: Boolean get() = this is Success
+
+    data class Success(val bssid: String, val band: BandType) : LockResult()
+    object ShizukuNotReady : LockResult()
+    data class No5GhzRadioFound(val ssid: String) : LockResult()
+    data class AssociationFailed(
+        val targetBssid: String,
+        val actualBssid: String?,
+        val reason: String = ""
+    ) : LockResult()
+    data class CommandFailed(val reason: String) : LockResult()
+}

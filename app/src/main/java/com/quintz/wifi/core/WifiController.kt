@@ -10,6 +10,7 @@ import android.os.Build
 import com.quintz.wifi.data.Preferences
 import com.quintz.wifi.model.AccessPointRadio
 import com.quintz.wifi.model.BandType
+import com.quintz.wifi.model.LockResult
 import com.quintz.wifi.model.WifiStatus
 import com.quintz.wifi.shizuku.ShizukuManager
 import kotlinx.coroutines.Dispatchers
@@ -201,46 +202,81 @@ class WifiController(private val context: Context) {
         bssid: String,
         passphrase: String,
         securityType: String = ""
-    ): Boolean = withContext(Dispatchers.IO) {
-        if (!ShizukuManager.isReady()) return@withContext false
+    ): LockResult = withContext(Dispatchers.IO) {
+        if (!ShizukuManager.isReady()) return@withContext LockResult.ShizukuNotReady
 
         _isOperating.value = true
         try {
             val sec = if (securityType.isNotEmpty()) securityType else detectSecurityType(ssid, bssid)
             val isOpen = sec == "open" || sec == "owe"
+            val pass = if (passphrase.isNotEmpty()) passphrase else prefs.getPassword(ssid).orEmpty()
 
-            if (!isOpen && passphrase.isNotEmpty()) {
-                prefs.savePassword(ssid, passphrase)
+            if (!isOpen && pass.isNotEmpty()) {
+                prefs.savePassword(ssid, pass)
             }
             prefs.lastTargetBand = "5GHz"
 
             val escapedSsid = ShizukuManager.escapeShellArg(ssid)
             val escapedBssid = ShizukuManager.escapeShellArg(bssid)
             val escapedSec = ShizukuManager.escapeShellArg(sec)
+            val escapedPass = if (!isOpen && pass.isNotEmpty()) ShizukuManager.escapeShellArg(pass) else null
 
-            val cmd = if (isOpen) {
-                "cmd wifi connect-network $escapedSsid $escapedSec -b $escapedBssid"
+            // 1. Update the saved network profile in WifiConfigStore to lock the BSSID
+            val addCmd = if (isOpen) {
+                "cmd wifi add-network $escapedSsid $escapedSec -b $escapedBssid"
+            } else if (escapedPass != null) {
+                "cmd wifi add-network $escapedSsid $escapedSec $escapedPass -b $escapedBssid"
             } else {
-                val escapedPass = ShizukuManager.escapeShellArg(passphrase)
-                "cmd wifi connect-network $escapedSsid $escapedSec $escapedPass -b $escapedBssid"
+                "cmd wifi add-network $escapedSsid $escapedSec -b $escapedBssid"
             }
-            val result = ShizukuManager.exec(cmd)
+            ShizukuManager.exec(addCmd)
+
+            // 2. Request connection to the target network and BSSID
+            val connectCmd = if (isOpen) {
+                "cmd wifi connect-network $escapedSsid $escapedSec -b $escapedBssid"
+            } else if (escapedPass != null) {
+                "cmd wifi connect-network $escapedSsid $escapedSec $escapedPass -b $escapedBssid"
+            } else {
+                "cmd wifi connect-network $escapedSsid $escapedSec -b $escapedBssid"
+            }
+            val result = ShizukuManager.exec(connectCmd)
 
             val currentStatus = _status.value
-            if (currentStatus.isConnected && currentStatus.ssid.equals(ssid, ignoreCase = true) &&
+            val isSameSsidDifferentBssid = currentStatus.isConnected &&
+                currentStatus.ssid.trim('"').equals(ssid.trim('"'), ignoreCase = true) &&
                 !currentStatus.bssid.equals(bssid, ignoreCase = true)
-            ) {
+
+            if (isSameSsidDifferentBssid) {
                 // If already connected to this network on a different BSSID,
                 // Android's WifiNetworkSelector skips re-association. Cycle Wi-Fi briefly to bind immediately.
                 ShizukuManager.exec("cmd wifi set-wifi-enabled disabled && cmd wifi set-wifi-enabled enabled")
+                kotlinx.coroutines.delay(1500)
+                // Re-trigger connect-network once Wi-Fi is re-enabled to ensure prompt association
+                ShizukuManager.exec(connectCmd)
                 awaitConnectionSettled(targetBssid = bssid, maxWaitMs = 12000L)
             } else {
-                awaitConnectionSettled(targetBssid = bssid, maxWaitMs = 5000L)
+                awaitConnectionSettled(targetBssid = bssid, maxWaitMs = 8000L)
             }
 
-            refreshStatus()
+            val finalStatus = refreshStatus()
             scanRadios()
-            result.isSuccess
+
+            // 3. Verify actual BSSID binding
+            if (finalStatus.isConnected && finalStatus.bssid.equals(bssid, ignoreCase = true)) {
+                LockResult.Success(bssid = finalStatus.bssid, band = finalStatus.band)
+            } else if (!result.isSuccess) {
+                LockResult.CommandFailed(result.stderr.ifEmpty { "Command failed with exit code ${result.exitCode}" })
+            } else {
+                LockResult.AssociationFailed(
+                    targetBssid = bssid,
+                    actualBssid = if (finalStatus.isConnected) finalStatus.bssid else null,
+                    reason = if (finalStatus.isConnected) {
+                        "Connected to ${finalStatus.bssid} instead of target $bssid"
+                    } else {
+                        "Connection timed out or failed to associate"
+                    }
+                )
+            }
         } finally {
             _isOperating.value = false
         }
@@ -325,20 +361,32 @@ class WifiController(private val context: Context) {
         return latestStatus
     }
 
-    suspend fun autoSelectAndLock5Ghz(ssid: String, passphrase: String): Boolean {
-        var currentRadios = _radios.value
-        if (currentRadios.isEmpty()) {
-            val quickScan = ShizukuManager.exec("cmd wifi list-scan-results")
-            val parsed = WifiParser.parseScanResults(quickScan.stdout, ssid, _status.value.bssid)
-            if (parsed.isNotEmpty()) {
-                currentRadios = parsed
-                _radios.value = parsed
-            } else {
-                currentRadios = scanRadios()
+    suspend fun autoSelectAndLock5Ghz(ssid: String, passphrase: String): LockResult {
+        if (!ShizukuManager.isReady()) {
+            return LockResult.ShizukuNotReady
+        }
+
+        // 1. Force a fresh scan to avoid targeting stale APs
+        val freshRadios = scanRadios()
+
+        // 2. Filter candidates strictly to the requested SSID and 5 GHz / 6 GHz bands
+        var candidates = freshRadios.filter {
+            it.ssid.trim('"').equals(ssid.trim('"'), ignoreCase = true) &&
+                (it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ)
+        }
+
+        // Fallback: If fresh scan produced no matches (e.g. temporary scan throttle), check recent cached radios for this SSID
+        if (candidates.isEmpty()) {
+            candidates = _radios.value.filter {
+                it.ssid.trim('"').equals(ssid.trim('"'), ignoreCase = true) &&
+                    (it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ)
             }
         }
-        val best5G = currentRadios.firstOrNull { it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ }
-            ?: return false
+
+        // If still no candidates matching this SSID on 5GHz/6GHz, return No5GhzRadioFound
+        val best5G = candidates.maxByOrNull { it.rssi }
+            ?: return LockResult.No5GhzRadioFound(ssid)
+
         val sec = detectSecurityFromFlags(best5G.flags)
         return lockToBssid(ssid, best5G.bssid, passphrase, sec)
     }
@@ -356,7 +404,7 @@ class WifiController(private val context: Context) {
         return "wpa2"
     }
 
-    private fun detectSecurityFromFlags(flags: String): String {
+    fun detectSecurityFromFlags(flags: String): String {
         val upper = flags.uppercase()
         return when {
             upper.contains("SAE") -> "wpa3"

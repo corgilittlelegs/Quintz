@@ -15,6 +15,7 @@ import com.quintz.wifi.R
 import com.quintz.wifi.core.WifiController
 import com.quintz.wifi.data.Preferences
 import com.quintz.wifi.model.BandType
+import com.quintz.wifi.model.LockResult
 import com.quintz.wifi.shizuku.ShizukuManager
 import com.quintz.wifi.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
@@ -89,16 +90,22 @@ class WatchdogService : Service() {
                                 loopDelay = fallbackScanInterval
                                 val radios = controller.scanRadios()
                                 val strong5G = radios.firstOrNull {
-                                    (it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ) &&
-                                            it.rssi >= prefs.recoveryThresholdRssi
+                                    it.ssid.trim('"').equals(status.ssid.trim('"'), ignoreCase = true) &&
+                                        (it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ) &&
+                                        it.rssi >= prefs.recoveryThresholdRssi
                                 }
                                 val isOpen = strong5G != null && strong5G.flags.uppercase().let {
                                     !it.contains("PSK") && !it.contains("SAE") && !it.contains("WEP")
                                 }
                                 if (strong5G != null && (!savedPassword.isNullOrEmpty() || isOpen)) {
                                     updateNotification("Strong 5 GHz found (${strong5G.rssi} dBm). Locking to 5 GHz...")
-                                    controller.lockToBssid(status.ssid, strong5G.bssid, savedPassword.orEmpty())
-                                    fallbackScanInterval = 12000L
+                                    val lockRes = controller.lockToBssid(status.ssid, strong5G.bssid, savedPassword.orEmpty())
+                                    if (lockRes is LockResult.Success) {
+                                        fallbackScanInterval = 12000L
+                                        updateNotification("Locked to 5 GHz • ${status.ssid} (${strong5G.rssi} dBm)")
+                                    } else {
+                                        fallbackScanInterval = 16000L
+                                    }
                                 } else {
                                     updateNotification("Connected (${status.band.displayName}) • Monitoring for 5 GHz")
                                     fallbackScanInterval = (fallbackScanInterval + 4000L).coerceAtMost(30000L)

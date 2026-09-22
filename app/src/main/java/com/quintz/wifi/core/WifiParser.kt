@@ -105,7 +105,8 @@ object WifiParser {
                 val afterAge = if (parts.size > 4) rest.substringAfter(parts[3]).trim() else ""
                 val flagsMatch = Regex("""(\[.+\])""").find(afterAge)
                 val flags = flagsMatch?.value.orEmpty()
-                val ssid = afterAge.replace(flags, "").trim()
+                val rawSsid = afterAge.replace(flags, "").trim()
+                val ssid = rawSsid.trim('"')
 
                 if (ssid.isEmpty() || ssid.equals("<unknown ssid>", ignoreCase = true) || ssid == "\"\"") {
                     continue
@@ -141,7 +142,7 @@ object WifiParser {
         // 4. Highest RSSI (signal strength)
         return deduplicated.sortedWith(
             compareByDescending<AccessPointRadio> { it.isCurrent }
-                .thenByDescending { currentSsid.isNotEmpty() && it.ssid.equals(currentSsid, ignoreCase = true) }
+                .thenByDescending { currentSsid.isNotEmpty() && it.ssid.trim('"').equals(currentSsid.trim('"'), ignoreCase = true) }
                 .thenByDescending { it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ }
                 .thenByDescending { it.rssi }
         )

@@ -15,6 +15,7 @@ import com.quintz.wifi.core.WifiController
 import com.quintz.wifi.data.Preferences
 import com.quintz.wifi.model.AccessPointRadio
 import com.quintz.wifi.model.BandType
+import com.quintz.wifi.model.LockResult
 import com.quintz.wifi.model.ShizukuState
 import com.quintz.wifi.model.WifiStatus
 import com.quintz.wifi.radar.RadarEngine
@@ -261,12 +262,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
-            val success = controller.autoSelectAndLock5Ghz(status.ssid, password)
+            val result = controller.autoSelectAndLock5Ghz(status.ssid, password)
             refreshAll()
-            if (success) {
-                _message.value = "Successfully locked to 5 GHz AP"
-            } else {
-                _message.value = "Could not find a 5 GHz radio for \"${status.ssid}\""
+            when (result) {
+                is LockResult.Success -> {
+                    _message.value = "Successfully locked to 5 GHz AP [${result.bssid}]"
+                }
+                is LockResult.No5GhzRadioFound -> {
+                    _message.value = "Could not find a 5 GHz radio for \"${result.ssid}\""
+                }
+                is LockResult.ShizukuNotReady -> {
+                    _message.value = "Shizuku service is not running or permission not granted"
+                }
+                is LockResult.AssociationFailed -> {
+                    val actual = result.actualBssid
+                    if (actual != null) {
+                        _message.value = "Failed to lock to ${result.targetBssid} (stayed on $actual)"
+                    } else {
+                        _message.value = "Failed to associate with 5 GHz AP [${result.targetBssid}]"
+                    }
+                }
+                is LockResult.CommandFailed -> {
+                    _message.value = "Lock command failed: ${result.reason}"
+                }
             }
         }
     }
@@ -275,12 +293,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val status = wifiStatus.value
             val targetSsid = radio.ssid.ifEmpty { status.ssid }
-            val success = controller.lockToBssid(targetSsid, radio.bssid, password)
+            val sec = controller.detectSecurityFromFlags(radio.flags)
+            val result = controller.lockToBssid(targetSsid, radio.bssid, password, sec)
             refreshAll()
-            if (success) {
-                _message.value = "Locked to AP [${radio.bssid}] on ${radio.band.displayName}"
-            } else {
-                _message.value = "Failed to lock to AP [${radio.bssid}]"
+            when (result) {
+                is LockResult.Success -> {
+                    _message.value = "Locked to AP [${radio.bssid}] on ${radio.band.displayName}"
+                }
+                is LockResult.ShizukuNotReady -> {
+                    _message.value = "Shizuku service is not running or permission not granted"
+                }
+                is LockResult.AssociationFailed -> {
+                    val actual = result.actualBssid
+                    if (actual != null) {
+                        _message.value = "Failed to bind to AP [${radio.bssid}] (stayed on $actual)"
+                    } else {
+                        _message.value = "Failed to associate with AP [${radio.bssid}]"
+                    }
+                }
+                is LockResult.CommandFailed -> {
+                    _message.value = "Lock command failed: ${result.reason}"
+                }
+                is LockResult.No5GhzRadioFound -> {
+                    _message.value = "Radio [${radio.bssid}] not found"
+                }
             }
         }
     }
