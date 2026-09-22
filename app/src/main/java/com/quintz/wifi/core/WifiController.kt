@@ -212,7 +212,7 @@ class WifiController(private val context: Context) {
             val pass = if (passphrase.isNotEmpty()) passphrase else prefs.getPassword(ssid).orEmpty()
 
             if (!isOpen && pass.isEmpty()) {
-                return@withContext LockResult.CommandFailed("Passphrase required for secured network \"$ssid\"")
+                return@withContext LockResult.CommandFailed("Wi-Fi password required for secured network \"$ssid\"")
             }
 
             if (!isOpen) {

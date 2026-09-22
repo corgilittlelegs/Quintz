@@ -710,11 +710,22 @@ fun MainScreen(viewModel: MainViewModel) {
                 shape = RoundedCornerShape(8.dp),
                 contentPadding = PaddingValues(20.dp)
             ) {
-                Text(
-                    text = "AUTHENTICATE BSSID",
-                    style = CliTypography.TelemetryLabel,
-                    color = CliAccent5GHz
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = null,
+                        tint = CliAccent5GHz,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Text(
+                        text = "WI-FI PASSWORD REQUIRED",
+                        style = CliTypography.TelemetryLabel,
+                        color = CliAccent5GHz
+                    )
+                }
                 val isTargetOpen = targetRadioForPassword?.let {
                     val upper = it.flags.uppercase()
                     !upper.contains("PSK") && !upper.contains("SAE") && !upper.contains("WEP")
@@ -723,16 +734,16 @@ fun MainScreen(viewModel: MainViewModel) {
                 val promptSsid = targetRadioForPassword?.ssid?.ifEmpty { wifiStatus.ssid } ?: wifiStatus.ssid
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = if (promptSsid.isNotEmpty()) "Network: \"$promptSsid\"" else "Network Credentials",
+                    text = if (promptSsid.isNotEmpty()) "Wi-Fi: \"$promptSsid\"" else "Wi-Fi Password",
                     style = Typography.titleMedium,
                     color = CliTextPrimary
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = if (isTargetOpen)
-                        "This network is Open / Unsecured. No passphrase required."
+                        "This network is Open / Unsecured. No password required."
                     else
-                        "Android requires credentials to enforce specific BSSID binding. Stored securely on-device.",
+                        "Android requires your Wi-Fi password to lock the connection to this access point. Stored securely on-device.",
                     style = Typography.bodyMedium,
                     color = CliTextSecondary
                 )
@@ -742,15 +753,18 @@ fun MainScreen(viewModel: MainViewModel) {
                     OutlinedTextField(
                         value = passwordInput,
                         onValueChange = { passwordInput = it },
+                        label = {
+                            Text("Wi-Fi Password", style = CliTypography.TelemetryLabel)
+                        },
                         placeholder = {
-                            Text("Enter passphrase :_", style = CliTypography.CodeMono, color = CliTextTertiary)
+                            Text("Enter Wi-Fi password :_", style = CliTypography.CodeMono, color = CliTextTertiary)
                         },
                         visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                         trailingIcon = {
                             IconButton(onClick = { passwordVisible = !passwordVisible }) {
                                 Icon(
                                     imageVector = if (passwordVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                                    contentDescription = if (passwordVisible) "Hide passphrase" else "Show passphrase",
+                                    contentDescription = if (passwordVisible) "Hide password" else "Show password",
                                     tint = CliTextSecondary
                                 )
                             }
@@ -763,7 +777,9 @@ fun MainScreen(viewModel: MainViewModel) {
                             focusedContainerColor = CliSurfaceElevated,
                             unfocusedContainerColor = CliSurfaceElevated,
                             focusedBorderColor = CliAccent5GHz,
-                            unfocusedBorderColor = CliBorder
+                            unfocusedBorderColor = CliBorder,
+                            focusedLabelColor = CliAccent5GHz,
+                            unfocusedLabelColor = CliTextSecondary
                         ),
                         shape = RoundedCornerShape(6.dp),
                         modifier = Modifier.fillMaxWidth()
