@@ -23,13 +23,13 @@
         android:strokeWidth="1.5"
         android:strokeLineCap="round"
         android:pathData="M12.16,12.16 L17.89,17.89" />
-    <!-- Radar Wave 1 -->
+    <!-- RF Wave 1 -->
     <path
         android:strokeColor="#00E5FF"
         android:strokeWidth="1.5"
         android:strokeLineCap="round"
         android:pathData="M19.65,15.46 A9.60,9.60 0 0 1 15.46,19.65" />
-    <!-- Radar Wave 2 -->
+    <!-- RF Wave 2 -->
     <path
         android:strokeColor="#00E5FF"
         android:strokeWidth="1.5"

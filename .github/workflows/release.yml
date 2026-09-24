@@ -9,9 +9,10 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag to release (e.g. v1.0.0). Leave empty to auto-calculate from commit count.'
+        description: 'Version to release (e.g. v1.2.6). Leave empty to auto-calculate from commit count.'
         required: false
         default: ''
+        type: string
 
 permissions:
   contents: write
@@ -39,8 +40,10 @@ jobs:
 
       - name: Determine Version
         id: get_version
+        env:
+          VERSION_INPUT: ${{ github.event.inputs.version }}
         run: |
-          RAW_TAG="${{ github.event.inputs.version }}"
+          RAW_TAG="$VERSION_INPUT"
           if [ -n "$RAW_TAG" ]; then
             VERSION_NAME="${RAW_TAG#v}"
             TAG_NAME="v${VERSION_NAME}"
@@ -56,7 +59,12 @@ jobs:
             VERSION_NAME="${A}.${B}.${C}"
             TAG_NAME="v${VERSION_NAME}"
           fi
-          
+
+          if ! [[ "$VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Version must be semantic-version-like (for example, v1.2.6)." >&2
+            exit 1
+          fi
+
           echo "version_name=${VERSION_NAME}" >> $GITHUB_OUTPUT
           echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
           echo "Resolved version_name: ${VERSION_NAME}, tag_name: ${TAG_NAME}"
@@ -65,21 +73,86 @@ jobs:
         run: |
           ./gradlew assembleRelease --no-daemon -PversionName="${{ steps.get_version.outputs.version_name }}"
 
-      - name: Prepare APK Asset
+      - name: Prepare APK Asset & Checksum
         id: prepare_asset
         run: |
           mkdir -p release_assets
           APK_NAME="Quintz-${{ steps.get_version.outputs.tag_name }}.apk"
           cp app/build/outputs/apk/release/app-release.apk "release_assets/${APK_NAME}"
+          sha256sum "release_assets/${APK_NAME}" > "release_assets/${APK_NAME}.sha256"
+          
           echo "apk_path=release_assets/${APK_NAME}" >> $GITHUB_OUTPUT
           echo "apk_name=${APK_NAME}" >> $GITHUB_OUTPUT
+          echo "checksum_path=release_assets/${APK_NAME}.sha256" >> $GITHUB_OUTPUT
+          echo "sha256=$(cut -d ' ' -f 1 "release_assets/${APK_NAME}.sha256")" >> $GITHUB_OUTPUT
 
       - name: Upload Artifact (Workflow Run)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.prepare_asset.outputs.apk_name }}
-          path: ${{ steps.prepare_asset.outputs.apk_path }}
+          path: release_assets/
           retention-days: 14
+
+      - name: Generate Changelog & Release Notes
+        id: release_notes
+        env:
+          TAG_NAME: ${{ steps.get_version.outputs.tag_name }}
+          APK_NAME: ${{ steps.prepare_asset.outputs.apk_name }}
+          APK_SHA256: ${{ steps.prepare_asset.outputs.sha256 }}
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          NOTES_PATH="release-notes.md"
+          
+          # Find the previous release tag
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 "$GITHUB_SHA^" 2>/dev/null || git tag --sort=-version:refname | grep -Fxv "$TAG_NAME" | head -n 1 || true)
+          
+          if [ -n "$PREVIOUS_TAG" ]; then
+            COMMIT_RANGE="${PREVIOUS_TAG}..${GITHUB_SHA}"
+          else
+            COMMIT_RANGE="${GITHUB_SHA}"
+          fi
+
+          append_section() {
+            local title="$1"
+            local pattern="$2"
+            local entries
+            entries=$(git log "$COMMIT_RANGE" --extended-regexp --grep="$pattern" \
+              --pretty=format:"- %s ([%h]($REPOSITORY_URL/commit/%H))" || true)
+            if [ -n "$entries" ]; then
+              printf '\n### %s\n\n%s\n' "$title" "$entries" >> "$NOTES_PATH"
+            fi
+          }
+
+          {
+            printf '# Quintz %s\n' "$TAG_NAME"
+            if [ -n "$PREVIOUS_TAG" ]; then
+              printf '\n*Changes since [%s](%s/compare/%s...%s)*\n' "$PREVIOUS_TAG" "$REPOSITORY_URL" "$PREVIOUS_TAG" "$TAG_NAME"
+            fi
+          } > "$NOTES_PATH"
+
+          append_section '🚀 New Features' '^feat'
+          append_section '🐛 Bug Fixes' '^fix'
+          append_section '⚡ Improvements & Refactoring' '^(refactor|perf)'
+          append_section '🛠️ Maintenance & CI' '^(ci|chore|build|docs|test)'
+
+          # Fallback if none of the conventional commit prefixes matched
+          if ! grep -q '^### ' "$NOTES_PATH"; then
+            printf '\n### 📝 Commits\n\n' >> "$NOTES_PATH"
+            git log "$COMMIT_RANGE" --pretty=format:"- %s ([%h]($REPOSITORY_URL/commit/%H))" >> "$NOTES_PATH" || true
+            printf '\n' >> "$NOTES_PATH"
+          fi
+
+          {
+            printf '\n---\n\n'
+            printf '### 📦 Installation & Verification\n\n'
+            printf '1. Download `%s` below.\n' "$APK_NAME"
+            printf '2. Install it on Android 10 or later.\n'
+            printf '3. Launch Shizuku and grant Quintz permission when prompted.\n\n'
+            printf '**SHA-256 Checksum:**\n```\n%s\n```\n' "$APK_SHA256"
+            printf '*(The matching `.sha256` checksum file is also attached below)*\n'
+          } >> "$NOTES_PATH"
+
+          echo "path=$NOTES_PATH" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -88,7 +161,9 @@ jobs:
           tag_name: ${{ steps.get_version.outputs.tag_name }}
           target_commitish: ${{ github.sha }}
           name: "Quintz ${{ steps.get_version.outputs.tag_name }}"
-          files: ${{ steps.prepare_asset.outputs.apk_path }}
-          generate_release_notes: true
+          body_path: ${{ steps.release_notes.outputs.path }}
+          files: |
+            ${{ steps.prepare_asset.outputs.apk_path }}
+            ${{ steps.prepare_asset.outputs.checksum_path }}
           draft: false
           prerelease: false

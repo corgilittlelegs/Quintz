@@ -5,16 +5,25 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.net.wifi.WifiInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.quintz.wifi.R
+import com.quintz.wifi.core.DiagnosticLogger
 import com.quintz.wifi.core.WifiController
 import com.quintz.wifi.data.Preferences
 import com.quintz.wifi.model.BandType
+import com.quintz.wifi.model.WifiStatus
 import com.quintz.wifi.shizuku.ShizukuManager
 import com.quintz.wifi.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
@@ -23,6 +32,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class WatchdogService : Service() {
 
@@ -31,6 +42,139 @@ class WatchdogService : Service() {
 
     private lateinit var controller: WifiController
     private lateinit var prefs: Preferences
+    private var connectivityManager: ConnectivityManager? = null
+
+    private val transitionMutex = Mutex()
+    private val isHandlingDisconnect = java.util.concurrent.atomic.AtomicBoolean(false)
+    private var lastDisconnectHandledTimeMs: Long = 0L
+
+    private var candidate5GBssid: String? = null
+    private var consecutiveCandidateObservations: Int = 0
+    private var lastCandidateObservedAge: Long = -1L
+    private var lastCandidateScanTimestamp: Long = 0L
+    private var last5GSwitchAttemptTimeMs: Long = 0L
+    private var switchCooldownMs: Long = 60000L
+
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onLost(network: Network) {
+            if (!prefs.isWatchdogEnabled) return
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            if (wm?.isWifiEnabled != true) return // User toggled Wi-Fi off intentionally
+
+            if (prefs.lastTargetBand == "5GHz" || prefs.isWatchdogFallbackActive) {
+                scope.launch {
+                    handlePotentialDisconnect("networkCallback.onLost")
+                }
+            }
+        }
+
+        override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+            if (!prefs.isWatchdogEnabled) return
+            if (!networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return
+
+            val wifiInfo = networkCapabilities.transportInfo as? WifiInfo ?: return
+            val is24Ghz = wifiInfo.frequency in 2400..2500
+
+            // If the Qualcomm driver gracefully roamed to 2.4 GHz while 5GHz is targeted, update status immediately
+            if (is24Ghz && prefs.lastTargetBand == "5GHz") {
+                val cleanSsid = wifiInfo.ssid?.replace("\"", "").orEmpty()
+                val effectiveSsid = if (cleanSsid.isNotEmpty() && !cleanSsid.equals("<unknown ssid>", ignoreCase = true)) {
+                    cleanSsid
+                } else {
+                    prefs.watchdogLastSsid.orEmpty()
+                }
+                updateNotification("Graceful 2.4 GHz fallback • ${effectiveSsid.ifEmpty { "Archer" }}")
+            }
+        }
+    }
+
+    private suspend fun handlePotentialDisconnect(source: String) {
+        if (!isHandlingDisconnect.compareAndSet(false, true)) {
+            DiagnosticLogger.log("WATCHDOG", "Disconnect handling already active; dropping redundant request from $source.")
+            return
+        }
+        try {
+            val now = System.currentTimeMillis()
+            if (now - lastDisconnectHandledTimeMs < 8000L) {
+                DiagnosticLogger.log("WATCHDOG", "Disconnect recently handled (${now - lastDisconnectHandledTimeMs}ms ago); skipping $source.")
+                return
+            }
+            lastDisconnectHandledTimeMs = now
+
+            transitionMutex.withLock {
+                // Android can take several seconds to run its own reconnect attempts after a
+                // failed handshake. In observed failures it retried for about 18 seconds; a
+                // 4-second app fallback can race that work and start a competing connect.
+                // Wait through a 20-second recovery window before issuing an app reconnect.
+                for (observation in 0 until 20) {
+                    val status = controller.refreshStatus()
+                    if (status.isConnected) {
+                        if (status.ssid.isNotEmpty()) {
+                            handleConnectedState(status, "handover check ${observation + 1}/20 ($source)")
+                        } else {
+                            DiagnosticLogger.log(
+                                "WATCHDOG",
+                                "Wi-Fi reports connected but SSID is not resolved during handover ($source); deferring fallback."
+                            )
+                        }
+                        return@withLock
+                    }
+
+                    if (observation < 19) delay(1000L)
+                }
+
+                // Still disconnected across 20 observations over 19 seconds; Android had time
+                // to complete its normal reconnect retries before the app intervenes.
+                val targetSsid = prefs.watchdogLastSsid.orEmpty()
+                DiagnosticLogger.log("WATCHDOG", "Confirmed disconnect across 20 observations over 19s ($source) for target '$targetSsid'.")
+                prefs.isWatchdogFallbackActive = true
+                updateNotification("Wi-Fi disconnected • Monitoring...")
+
+                if (targetSsid.isNotEmpty()) {
+                    val savedPassword = prefs.getPassword(targetSsid)
+                    val correlationId = DiagnosticLogger.newCorrelationId()
+                    DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId source=watchdog_disconnect_fallback action=unlock_to_auto targetSsid='$targetSsid'")
+                    controller.unlockToAuto(
+                        targetSsid,
+                        savedPassword,
+                        isAutomatedFallback = true,
+                        requestSource = "watchdog_disconnect_fallback",
+                        correlationId = correlationId
+                    )
+                }
+            }
+        } finally {
+            isHandlingDisconnect.set(false)
+        }
+    }
+
+    private fun handleConnectedState(status: WifiStatus, contextDesc: String) {
+        val targetSsid = prefs.watchdogLastSsid.orEmpty()
+        DiagnosticLogger.log(
+            "WATCHDOG",
+            "Device connected ($contextDesc): SSID='${status.ssid}', band=${status.band.displayName}, rssi=${status.rssi} dBm. Link preserved."
+        )
+        if (targetSsid.isEmpty() || status.ssid.equals(targetSsid, ignoreCase = true)) {
+            if (status.band == BandType.BAND_2_4_GHZ) {
+                prefs.isWatchdogFallbackActive = true
+                updateNotification("Graceful 2.4 GHz fallback • ${status.ssid}")
+            } else {
+                prefs.isWatchdogFallbackActive = false
+                val label = if (status.isLockedToBssid) "Locked to BSSID" else "Preferred 5 GHz (Roam Allowed)"
+                updateNotification("$label • ${status.ssid} (${status.rssi} dBm)")
+            }
+        } else {
+            // Connected to a DIFFERENT SSID! (e.g. user selected another network)
+            // NEVER disrupt an active connection to another network!
+            DiagnosticLogger.log(
+                "WATCHDOG",
+                "Connected to different SSID '${status.ssid}' (previous target '$targetSsid'). Preserving active connection."
+            )
+            prefs.watchdogLastSsid = status.ssid
+            prefs.isWatchdogFallbackActive = false
+            updateNotification("Connected • ${status.ssid}")
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -38,6 +182,17 @@ class WatchdogService : Service() {
         prefs = Preferences(this)
         createNotificationChannel()
         startServiceInForeground()
+        
+        connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        try {
+            val request = NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .build()
+            connectivityManager?.registerNetworkCallback(request, networkCallback)
+        } catch (e: Exception) {
+            android.util.Log.e("Watchdog", "Failed to register NetworkCallback", e)
+        }
+
         startWatchdogLoop()
     }
 
@@ -63,62 +218,160 @@ class WatchdogService : Service() {
     private fun startWatchdogLoop() {
         scope.launch {
             var fallbackScanInterval = 12000L
-            var lastKnownSsid = ""
+            var lastKnownSsid = prefs.watchdogLastSsid.orEmpty()
             while (isActive) {
-                var loopDelay = 15000L
-                if (prefs.isWatchdogEnabled && ShizukuManager.isReady()) {
+                var loopDelay = 12000L
+                if (prefs.isWatchdogEnabled) {
+                    if (!ShizukuManager.isReady()) {
+                        updateNotification("Waiting for Shizuku permission...")
+                        delay(10000L)
+                        continue
+                    }
+
                     try {
                         val status = controller.refreshStatus()
                         if (status.isConnected && status.ssid.isNotEmpty()) {
                             lastKnownSsid = status.ssid
+                            prefs.watchdogLastSsid = status.ssid
                             val savedPassword = prefs.getPassword(status.ssid)
 
-                            if (status.isLockedToBssid && (status.band == BandType.BAND_5_GHZ || status.band == BandType.BAND_6_GHZ)) {
-                                // Passive RSSI check: no active radio scan needed when healthy on 5 GHz
+                            if (status.band == BandType.BAND_5_GHZ || status.band == BandType.BAND_6_GHZ) {
+                                // Healthy on 5 GHz: profile is unpinned, so hardware will roam gracefully to 2.4 GHz if signal dips
                                 fallbackScanInterval = 12000L
-                                if (status.rssi < prefs.fallbackThresholdRssi && status.rssi > -120) {
-                                    // Fallback to auto to preserve internet
-                                    updateNotification("Low 5 GHz signal (${status.rssi} dBm). Falling back to Auto...")
-                                    controller.unlockToAuto(status.ssid, savedPassword)
-                                    loopDelay = 8000L
-                                } else {
-                                    updateNotification("Locked to 5 GHz • ${status.ssid} (${status.rssi} dBm)")
-                                }
-                            } else if (prefs.lastTargetBand == "5GHz") {
-                                // In fallback mode: scan to check if 5 GHz is strong again
+                                prefs.isWatchdogFallbackActive = false
+                                consecutiveCandidateObservations = 0
+                                candidate5GBssid = null
+                                lastCandidateScanTimestamp = 0L
+                                lastCandidateObservedAge = -1L
+                                switchCooldownMs = 60000L
+                                val label = if (status.isLockedToBssid) "Locked to BSSID" else "Preferred 5 GHz (Roam Allowed)"
+                                updateNotification("$label • ${status.ssid} (${status.rssi} dBm)")
+                            } else if (prefs.lastTargetBand == "5GHz" || prefs.isWatchdogFallbackActive) {
+                                // In fallback mode or caught in silent OEM drift: scan to check if 5 GHz is strong again
                                 loopDelay = fallbackScanInterval
-                                val radios = controller.scanRadios()
-                                val strong5G = radios.firstOrNull {
-                                    (it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ) &&
-                                            it.rssi >= prefs.recoveryThresholdRssi
-                                }
-                                val isOpen = strong5G != null && strong5G.flags.uppercase().let {
-                                    !it.contains("PSK") && !it.contains("SAE") && !it.contains("WEP")
-                                }
-                                if (strong5G != null && (!savedPassword.isNullOrEmpty() || isOpen)) {
-                                    updateNotification("Strong 5 GHz found (${strong5G.rssi} dBm). Locking to 5 GHz...")
-                                    controller.lockToBssid(status.ssid, strong5G.bssid, savedPassword.orEmpty())
-                                    fallbackScanInterval = 12000L
+                                val now = System.currentTimeMillis()
+                                val timeSinceLastAttempt = now - last5GSwitchAttemptTimeMs
+
+                                if (timeSinceLastAttempt < switchCooldownMs) {
+                                    val remainingSec = ((switchCooldownMs - timeSinceLastAttempt) / 1000L).coerceAtLeast(1L)
+                                    val modeDesc = if (prefs.isWatchdogFallbackActive) "Graceful 2.4 GHz fallback" else "Connected (2.4 GHz)"
+                                    updateNotification("$modeDesc (${status.ssid}) • Cooldown ${remainingSec}s")
                                 } else {
-                                    updateNotification("Connected (${status.band.displayName}) • Monitoring for 5 GHz")
-                                    fallbackScanInterval = (fallbackScanInterval + 4000L).coerceAtMost(30000L)
+                                    transitionMutex.withLock {
+                                        val radios = controller.scanRadios()
+                                        val strongFresh5G = radios.firstOrNull {
+                                            it.ssid.equals(status.ssid, ignoreCase = true) &&
+                                                    (it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ) &&
+                                                    it.rssi >= prefs.recoveryThresholdRssi &&
+                                                    it.ageSeconds <= 8L
+                                        }
+
+                                        if (strongFresh5G != null) {
+                                            val isSameCandidate = strongFresh5G.bssid.equals(candidate5GBssid, ignoreCase = true)
+                                            val timeSinceLastScan = now - lastCandidateScanTimestamp
+
+                                            if (isSameCandidate && timeSinceLastScan >= 10000L && strongFresh5G.ageSeconds <= 6L) {
+                                                // Distinct scan confirmed: at least 10s elapsed since prior scan, and fresh age proved new scan completed
+                                                consecutiveCandidateObservations++
+                                            } else if (!isSameCandidate) {
+                                                candidate5GBssid = strongFresh5G.bssid
+                                                consecutiveCandidateObservations = 1
+                                            }
+                                            lastCandidateScanTimestamp = now
+                                            lastCandidateObservedAge = strongFresh5G.ageSeconds
+
+                                            DiagnosticLogger.log(
+                                                "WATCHDOG",
+                                                "5GHz candidate [${strongFresh5G.bssid}] observation $consecutiveCandidateObservations/2: RSSI=${strongFresh5G.rssi} dBm, age=${strongFresh5G.ageSeconds}s, timeSincePriorScan=${timeSinceLastScan}ms"
+                                            )
+
+                                            val isOpen = strongFresh5G.flags.uppercase().let {
+                                                !it.contains("PSK") && !it.contains("SAE") && !it.contains("WEP")
+                                            }
+
+                                            // Only attempt transition after candidate is verified fresh & strong across at least 2 distinct cycles
+                                            if (consecutiveCandidateObservations >= 2 && (!savedPassword.isNullOrEmpty() || isOpen)) {
+                                                DiagnosticLogger.log(
+                                                    "WATCHDOG",
+                                                    "5GHz candidate verified across repeated distinct scans. Returning to preferred band: ${strongFresh5G.bssid} (${strongFresh5G.rssi} dBm), current link ${status.band.displayName} at ${status.rssi} dBm."
+                                                )
+                                                updateNotification("Returning to verified 5 GHz (${strongFresh5G.rssi} dBm)...")
+                                                last5GSwitchAttemptTimeMs = System.currentTimeMillis()
+                                                val correlationId = DiagnosticLogger.newCorrelationId()
+                                                DiagnosticLogger.log(
+                                                    "WIFI_ACTION",
+                                                    "id=$correlationId source=watchdog_5ghz_recovery action=lock_to_bssid ssid='${status.ssid}' targetBssid=${strongFresh5G.bssid} candidateRssi=${strongFresh5G.rssi} currentBssid=${status.bssid} currentBand=${status.band.displayName} currentRssi=${status.rssi}"
+                                                )
+
+                                                val switched = controller.lockToBssid(
+                                                    status.ssid,
+                                                    strongFresh5G.bssid,
+                                                    savedPassword.orEmpty(),
+                                                    unpinProfileForRoaming = true,
+                                                    deferIfHealthy24Ghz = true,
+                                                    allowSwitchFromHealthy24Ghz = true,
+                                                    requestSource = "watchdog_5ghz_recovery",
+                                                    correlationId = correlationId
+                                                )
+                                                if (switched) {
+                                                    prefs.isWatchdogFallbackActive = false
+                                                    fallbackScanInterval = 12000L
+                                                    consecutiveCandidateObservations = 0
+                                                    candidate5GBssid = null
+                                                    lastCandidateScanTimestamp = 0L
+                                                    lastCandidateObservedAge = -1L
+                                                    switchCooldownMs = 60000L
+                                                    val postStatus = controller.status.value
+                                                    val label = if (postStatus.isLockedToBssid) "Locked to BSSID" else "Preferred 5 GHz (Roam Allowed)"
+                                                    updateNotification("$label • ${postStatus.ssid} (${postStatus.rssi} dBm)")
+                                                } else {
+                                                    // A failed attempt still backs off to avoid repeated association churn.
+                                                    switchCooldownMs = (switchCooldownMs + 30000L).coerceAtMost(300000L)
+                                                    consecutiveCandidateObservations = 0
+                                                    candidate5GBssid = null
+                                                    lastCandidateScanTimestamp = 0L
+                                                    lastCandidateObservedAge = -1L
+                                                    fallbackScanInterval = (fallbackScanInterval + 4000L).coerceAtMost(30000L)
+                                                    DiagnosticLogger.log(
+                                                        "WATCHDOG",
+                                                        "5 GHz recovery attempt failed. Backing off retry cooldown to ${switchCooldownMs / 1000L}s."
+                                                    )
+                                                    updateNotification("5 GHz recovery failed • Retrying later")
+                                                }
+                                            } else {
+                                                updateNotification("Observing 5 GHz (${strongFresh5G.rssi} dBm, $consecutiveCandidateObservations/2) • ${status.ssid}")
+                                            }
+                                        } else {
+                                            if (consecutiveCandidateObservations > 0) {
+                                                DiagnosticLogger.log("WATCHDOG", "5GHz candidate lost or dropped below threshold; resetting observation counter.")
+                                            }
+                                            consecutiveCandidateObservations = 0
+                                            candidate5GBssid = null
+                                            lastCandidateScanTimestamp = 0L
+                                            lastCandidateObservedAge = -1L
+
+                                            val modeDesc = if (prefs.isWatchdogFallbackActive) "Graceful 2.4 GHz fallback" else "Monitoring for 5 GHz"
+                                            updateNotification("$modeDesc (${status.band.displayName}) • ${status.ssid}")
+                                            fallbackScanInterval = (fallbackScanInterval + 4000L).coerceAtMost(30000L)
+                                        }
+                                    }
                                 }
                             } else {
                                 fallbackScanInterval = 12000L
+                                prefs.isWatchdogFallbackActive = false
+                                consecutiveCandidateObservations = 0
+                                candidate5GBssid = null
+                                lastCandidateScanTimestamp = 0L
+                                lastCandidateObservedAge = -1L
                                 updateNotification("Auto-Roam • ${status.ssid}")
                             }
                         } else {
-                            // Connection lost / disconnected
-                            if (lastKnownSsid.isNotEmpty() && prefs.lastTargetBand == "5GHz") {
-                                val savedPassword = prefs.getPassword(lastKnownSsid)
-                                updateNotification("5 GHz lost. Unlocking to Auto to restore connection...")
-                                controller.unlockToAuto(lastKnownSsid, savedPassword)
-                                loopDelay = 6000L
-                            } else {
-                                updateNotification("Wi-Fi disconnected • Monitoring...")
-                            }
+                            // Connection lost / disconnected: debounce before any command
+                            handlePotentialDisconnect("watchdogLoop")
+                            loopDelay = 6000L
                         }
                     } catch (e: Exception) {
+                        DiagnosticLogger.log("WATCHDOG", "Error in watchdog loop: ${e.message}")
                         android.util.Log.e("Watchdog", "Watchdog loop error", e)
                     }
                 }
@@ -128,6 +381,9 @@ class WatchdogService : Service() {
     }
 
     override fun onDestroy() {
+        try {
+            connectivityManager?.unregisterNetworkCallback(networkCallback)
+        } catch (_: Exception) {}
         serviceJob.cancel()
         super.onDestroy()
     }

@@ -15,6 +15,16 @@ object WifiParser {
     private val IP_REGEX = Regex("""IP:\s*/?([0-9.]+)""")
     private val SEC_TYPE_REGEX = Regex("""Security type:\s*(\d+)""")
 
+    /** Reads identity fields from dumpsys output even when it omits connection-state markers. */
+    fun parseConnectionIdentity(output: String): Pair<String, String> {
+        val rawSsid = SSID_REGEX.find(output)?.groupValues?.get(1)?.trim().orEmpty()
+        val ssid = rawSsid.takeUnless {
+            it.equals("<unknown ssid>", ignoreCase = true) || it.equals("<none>", ignoreCase = true)
+        }.orEmpty()
+        val bssid = BSSID_REGEX.find(output)?.groupValues?.get(1).orEmpty()
+        return ssid to bssid
+    }
+
     fun parseStatus(statusOutput: String, lockDumpLine: String? = null): WifiStatus {
         val hasConnectedString = statusOutput.contains("Wifi is connected to", ignoreCase = true)
         val hasSupplicantCompleted = statusOutput.contains("Supplicant state: COMPLETED", ignoreCase = true) &&
@@ -79,7 +89,25 @@ object WifiParser {
         return if (isExplicitBssid) Pair(true, candidate) else Pair(false, null)
     }
 
-    fun parseScanResults(scanOutput: String, currentSsid: String, currentBssid: String): List<AccessPointRadio> {
+    fun parseNetworkId(listNetworksOutput: String, ssid: String): Int? {
+        val cleanSsid = ssid.trim('"').trim()
+        if (cleanSsid.isEmpty()) return null
+        val regex = Regex("""^\s*(\d+)\s+${Regex.escape(cleanSsid)}\b""", RegexOption.IGNORE_CASE)
+        for (line in listNetworksOutput.lineSequence()) {
+            val match = regex.find(line)
+            if (match != null) {
+                return match.groupValues[1].toIntOrNull()
+            }
+        }
+        return null
+    }
+
+    fun parseScanResults(
+        scanOutput: String,
+        currentSsid: String,
+        currentBssid: String,
+        maxAgeSeconds: Long? = 15L
+    ): List<AccessPointRadio> {
         val lines = scanOutput.lines()
         val results = mutableListOf<AccessPointRadio>()
 
@@ -99,6 +127,15 @@ object WifiParser {
                 val rssiRaw = parts[2].substringBefore('(')
                 val rssi = rssiRaw.toIntOrNull() ?: -99
                 if (rssi <= -127) continue
+
+                // Parse Age in seconds and enforce scan freshness.
+                // Fail closed (Long.MAX_VALUE) if age is unparseable or missing.
+                val ageSeconds = parts[3].toDoubleOrNull()?.toLong()
+                    ?: parts[3].substringBefore('.').toLongOrNull()
+                    ?: Long.MAX_VALUE
+                if (maxAgeSeconds != null && ageSeconds > maxAgeSeconds) {
+                    continue // Reject stale cached scan results
+                }
 
                 // Reconstruct SSID and Flags
                 val rest = trimmed.substringAfter(parts[2]).trim()
@@ -124,7 +161,8 @@ object WifiParser {
                         channel = channel,
                         rssi = rssi,
                         flags = flags,
-                        isCurrent = isCurrentRadio
+                        isCurrent = isCurrentRadio,
+                        ageSeconds = ageSeconds
                     )
                 )
             }

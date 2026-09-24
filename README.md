@@ -16,19 +16,7 @@
 
 Modern routers broadcast both 2.4 GHz and 5 GHz (or 6 GHz) under a unified SSID. While 5 GHz delivers gigabit speeds and ultra-low latency, Android’s default roaming logic is notoriously conservative. Once your device steps down to 2.4 GHz, it will stubbornly remain connected to the slower, congested band—even when you walk right back next to the router.
 
-Quintz leverages the **[Shizuku](https://shizuku.rikka.app)** privileged API bridge to lock Android directly to the 5 GHz / 6 GHz radio of your network **without needing root access**, while providing real-time AP telemetry, automated fallback protection, and an RF directional radar.
-
----
-
-## Screenshots
-
-<div align="center">
-  <img src="docs/screenshots/overview.png" width="85%" alt="Quintz Overview & AP Scanner" />
-  <br/><br/>
-  <img src="docs/screenshots/radar.png" width="85%" alt="Tactical Wi-Fi Radar" />
-  <br/><br/>
-  <img src="docs/screenshots/schematic.png" width="85%" alt="Radar RF Principles" />
-</div>
+Quintz leverages the **[Shizuku](https://shizuku.rikka.app)** privileged API bridge to lock Android directly to the 5 GHz / 6 GHz radio of your network **without needing root access**, while providing real-time AP telemetry, automated fallback protection, and a real-time roaming & RF telemetry monitor.
 
 ---
 
@@ -43,17 +31,24 @@ Quintz leverages the **[Shizuku](https://shizuku.rikka.app)** privileged API bri
 ### 🛡️ Smart Fallback Watchdog
 - Low-power foreground service continuously tracks live RSSI signal quality.
 - **Auto-Unlock**: If you walk into a dead zone where 5 GHz signal drops below `-82 dBm`, the watchdog automatically unlocks the connection to Auto-Roam mode so you never lose internet.
-- **Auto-Recovery**: Once you return to an area with strong 5 GHz reception (`≥ -72 dBm`), the watchdog seamlessly re-locks to 5 GHz.
+- **Auto-Recovery**: Once you return to an area with strong 5 GHz reception (`≥ -70 dBm`), the watchdog seamlessly re-locks to 5 GHz.
+- **Silent Drift Detection**: Detects when OEM firmware (e.g. Samsung Intelligent Wi-Fi or Qualcomm firmware roaming) silently steers the connection to 2.4 GHz while signal is healthy, and re-pins the device back to 5 GHz.
 - Built with progressive scan backoff (12s → 30s) to minimize battery impact.
 
-### 📡 Tactical Wi-Fi Radar (RF Direction Finder)
-- Directional scanner powered by **RF body shielding** and sensor fusion (gyroscope, accelerometer, magnetometer).
-- **Forward-Up Heads-Up Display**: 12 o'clock points where your device is facing (`▲ AHEAD`), while the 360° compass rose rotates with device azimuth.
-- **360° Polar Sector Heatmap**: Maps 36 radial sectors with color-coded signal tiers:
-  - 🟢 **Green** (`-50` to `-65 dBm`): Peak reception / line-of-sight.
-  - 🔵 **Cyan** (`-66` to `-76 dBm`): Moderate reception.
-  - 🟠 **Amber / Red** (`< -76 dBm`): Attenuated reception / shadowed.
-- Real-time estimated distance and directional alignment prompts (e.g. `TURN LEFT 42° TO FACE ROUTER`).
+### ⚙️ How BSSID Pinning Works & Technical Realities
+- **The Mechanism**: Quintz configures Android's saved network profile using `cmd wifi connect-network <SSID> <sec> [pass] -b <BSSID> -r <none|persistent>` via Shizuku. This tells Android's `WifiConfigManager` to restrict candidate selection to the designated hardware BSSID.
+- **Per-Network MAC Policy**: Supports Device MAC (`-r none`) for router DHCP static reservations or Randomized MAC (`-r persistent`) for privacy.
+- **OEM & Firmware Realities**:
+  - In Android, Qualcomm Wi-Fi driver firmware (`wlan_driver`) and OEM layers (e.g., Samsung's *Intelligent Wi-Fi* / `SemWifi`) retain autonomous driver-level roaming authority.
+  - If RF signal degrades severely or the router issues IEEE 802.11k/v BSS transition management frames, the underlying Wi-Fi chip may autonomously reassociate to 2.4 GHz.
+  - **Why the Watchdog is Essential**: Because no user-space application can completely override kernel/firmware RF safety fallbacks, Quintz's Watchdog actively detects these silent drifts and re-pins the 5 GHz band as soon as RF conditions permit.
+
+### 📊 Real-Time Roaming & RF Telemetry Monitor
+- Real-time rolling oscilloscope canvas tracking active connection RSSI and PHY link speed over time.
+- **Multi-AP Roaming Crossover Detection**: Plots candidate BSSIDs under the same network simultaneously to visually expose sticky client behavior and highlight optimal handoff opportunities.
+- **Color-Coded RF Quality Bands**: Visual thresholds for Optimal (`> -65 dBm`), Evaluation (`-65 to -75 dBm`), and Roam / Weak (`< -75 dBm`) zones.
+- **Automated Handoff Event Tracking**: Drops timestamped event pins whenever band or BSSID transitions take place.
+- **Interactive AP Legend**: Instant 1-tap BSSID locking directly from the telemetry monitor.
 
 ### 📊 AP Scanner & Channel Analyzer
 - Scans and lists all nearby access points, frequencies, channel numbers, and MACs.

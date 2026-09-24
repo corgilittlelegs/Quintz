@@ -41,7 +41,6 @@ class MainActivity : ComponentActivity() {
         ShizukuManager.updateState(this)
         viewModel.refreshAll()
         viewModel.startForegroundPolling()
-        viewModel.resumeRadarIfActive()
     }
 
     override fun onPause() {

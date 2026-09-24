@@ -1,5 +1,7 @@
 package com.quintz.wifi.model
 
+const val HEALTHY_24G_THRESHOLD_RSSI = -75
+
 enum class BandType(val displayName: String, val frequencyRange: String) {
     BAND_2_4_GHZ("2.4 GHz", "2412–2484 MHz"),
     BAND_5_GHZ("5 GHz", "5160–5885 MHz"),
@@ -16,6 +18,12 @@ enum class BandType(val displayName: String, val frequencyRange: String) {
     }
 }
 
+/** The Wi-Fi MAC identity scheme to use for a network profile. */
+enum class MacAddressPolicy(val shellFlagValue: String, val displayName: String) {
+    DEVICE("none", "Device MAC"),
+    RANDOMIZED("persistent", "Randomized MAC")
+}
+
 data class WifiStatus(
     val isConnected: Boolean = false,
     val ssid: String = "",
@@ -28,8 +36,13 @@ data class WifiStatus(
     val ipAddress: String = "",
     val securityType: String = "",
     val isLockedToBssid: Boolean = false,
-    val lockedBssid: String? = null
-)
+    val lockedBssid: String? = null,
+    val isPreferred5GHz: Boolean = false,
+    val isPreferred5GHzFallback: Boolean = false
+) {
+    val isSteeredOrLocked: Boolean
+        get() = isLockedToBssid || isPreferred5GHz || isPreferred5GHzFallback
+}
 
 data class AccessPointRadio(
     val bssid: String,
@@ -39,7 +52,8 @@ data class AccessPointRadio(
     val channel: Int,
     val rssi: Int,
     val flags: String,
-    val isCurrent: Boolean = false
+    val isCurrent: Boolean = false,
+    val ageSeconds: Long = 0L
 ) {
     companion object {
         fun frequencyToChannel(freq: Int): Int = when (freq) {

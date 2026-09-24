@@ -7,6 +7,7 @@ import android.os.Build
 import android.service.quicksettings.Tile
 import android.widget.Toast
 import com.quintz.wifi.R
+import com.quintz.wifi.core.DiagnosticLogger
 import com.quintz.wifi.core.WifiController
 import com.quintz.wifi.data.Preferences
 import com.quintz.wifi.model.BandType
@@ -49,13 +50,22 @@ class TileService : android.service.quicksettings.TileService() {
 
     override fun onClick() {
         super.onClick()
+        val correlationId = DiagnosticLogger.newCorrelationId()
         val tile = qsTile ?: return
-        if (isClickHandling) return
+        if (isClickHandling) {
+            DiagnosticLogger.log("USER_ACTION", "id=$correlationId source=quick_settings_tile callback=onClick result=ignored reason=already_handling")
+            return
+        }
         isClickHandling = true
+        DiagnosticLogger.log(
+            "USER_ACTION",
+            "id=$correlationId source=quick_settings_tile callback=onClick tileState=${tile.state} subtitle='${tile.subtitle}'"
+        )
 
         serviceScope.launch {
             try {
                 if (!ShizukuManager.isReady()) {
+                    DiagnosticLogger.log("USER_ACTION", "id=$correlationId source=quick_settings_tile result=aborted reason=shizuku_not_ready")
                     withContext(Dispatchers.Main) {
                         tile.state = Tile.STATE_UNAVAILABLE
                         tile.label = "Quintz"
@@ -67,7 +77,12 @@ class TileService : android.service.quicksettings.TileService() {
                 }
 
                 val current = controller.refreshStatus()
+                DiagnosticLogger.log(
+                    "USER_ACTION",
+                    "id=$correlationId source=quick_settings_tile state_snapshot connected=${current.isConnected} ssid='${current.ssid}' bssid=${current.bssid} band=${current.band.displayName} rssi=${current.rssi} locked=${current.isLockedToBssid} preferred5G=${current.isPreferred5GHz}"
+                )
                 if (!current.isConnected || current.ssid.isEmpty()) {
+                    DiagnosticLogger.log("USER_ACTION", "id=$correlationId source=quick_settings_tile result=aborted reason=not_connected")
                     withContext(Dispatchers.Main) {
                         tile.state = Tile.STATE_INACTIVE
                         tile.label = "Quintz"
@@ -80,8 +95,8 @@ class TileService : android.service.quicksettings.TileService() {
 
                 val password = prefs.getPassword(current.ssid)
 
-                if (current.isLockedToBssid) {
-                    // Currently locked to any BSSID -> Unlock to Auto
+                if (current.isSteeredOrLocked) {
+                    // Currently steered or locked -> Unlock to Auto
                     withContext(Dispatchers.Main) {
                         tile.state = Tile.STATE_INACTIVE
                         tile.label = "Quintz"
@@ -89,24 +104,40 @@ class TileService : android.service.quicksettings.TileService() {
                         tile.updateTile()
                         Toast.makeText(this@TileService, "Quintz: Unlocking to Auto-Roam...", Toast.LENGTH_SHORT).show()
                     }
-                    controller.unlockToAuto(current.ssid, password)
+                    val policy = prefs.getMacPolicy(current.ssid) ?: prefs.defaultMacPolicy
+                    val success = controller.unlockToAuto(
+                        current.ssid,
+                        password,
+                        macAddressPolicy = policy,
+                        requestSource = "quick_settings_tile",
+                        correlationId = correlationId
+                    )
+                    DiagnosticLogger.log("USER_ACTION", "id=$correlationId source=quick_settings_tile result=${if (success) "success" else "failure"} action=unlock_to_auto")
                     withContext(Dispatchers.Main) {
                         Toast.makeText(this@TileService, "Quintz: Switched to Auto-Roam", Toast.LENGTH_SHORT).show()
                     }
                 } else {
-                    // Auto mode -> Lock to 5 GHz
+                    // Auto mode -> Prefer 5 GHz
+                    val policy = prefs.getMacPolicy(current.ssid) ?: prefs.defaultMacPolicy
                     if (!password.isNullOrEmpty()) {
                         withContext(Dispatchers.Main) {
                             tile.state = Tile.STATE_ACTIVE
                             tile.label = "Quintz"
-                            tile.subtitle = "Locking to 5 GHz..."
+                            tile.subtitle = "Steering to 5 GHz..."
                             tile.updateTile()
-                            Toast.makeText(this@TileService, "Quintz: Locking to 5 GHz...", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this@TileService, "Quintz: Preferring 5 GHz (${policy.displayName})...", Toast.LENGTH_SHORT).show()
                         }
-                        val success = controller.autoSelectAndLock5Ghz(current.ssid, password)
+                        val success = controller.autoSelectAndLock5Ghz(
+                            current.ssid,
+                            password,
+                            policy,
+                            requestSource = "quick_settings_tile",
+                            correlationId = correlationId
+                        )
+                        DiagnosticLogger.log("USER_ACTION", "id=$correlationId source=quick_settings_tile result=${if (success) "success" else "failure"} action=prefer_5ghz")
                         withContext(Dispatchers.Main) {
                             if (success) {
-                                Toast.makeText(this@TileService, "Quintz: Successfully locked to 5 GHz", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(this@TileService, "Quintz: Preferred 5 GHz active (Roam Allowed)", Toast.LENGTH_SHORT).show()
                             } else {
                                 Toast.makeText(this@TileService, "Quintz: No 5 GHz radio found", Toast.LENGTH_SHORT).show()
                             }
@@ -136,6 +167,7 @@ class TileService : android.service.quicksettings.TileService() {
 
                 updateTileState()
             } catch (e: Exception) {
+                DiagnosticLogger.log("USER_ACTION", "id=$correlationId source=quick_settings_tile result=exception type=${e.javaClass.simpleName} message=${e.message}")
                 android.util.Log.e("TileService", "Error handling tile click", e)
             } finally {
                 isClickHandling = false
@@ -172,6 +204,13 @@ class TileService : android.service.quicksettings.TileService() {
                     tile.state = Tile.STATE_ACTIVE
                     val ch = com.quintz.wifi.model.AccessPointRadio.frequencyToChannel(status.frequency)
                     tile.subtitle = "Locked Ch $ch (${status.band.displayName})"
+                } else if (status.isPreferred5GHz) {
+                    tile.state = Tile.STATE_ACTIVE
+                    val ch = com.quintz.wifi.model.AccessPointRadio.frequencyToChannel(status.frequency)
+                    tile.subtitle = "Preferred 5 GHz (Ch $ch)"
+                } else if (status.isPreferred5GHzFallback) {
+                    tile.state = Tile.STATE_ACTIVE
+                    tile.subtitle = "5G Fallback (${status.band.displayName})"
                 } else {
                     tile.state = Tile.STATE_INACTIVE
                     tile.subtitle = "Auto-Roam (${status.band.displayName})"

@@ -22,22 +22,26 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.quintz.wifi.BuildConfig
+import com.quintz.wifi.core.DiagnosticLogger
 import com.quintz.wifi.model.AccessPointRadio
 import com.quintz.wifi.model.BandType
+import com.quintz.wifi.model.MacAddressPolicy
 import com.quintz.wifi.model.ShizukuState
 import com.quintz.wifi.model.WifiStatus
-import com.quintz.wifi.radar.RadarEngine
 import com.quintz.wifi.shizuku.ShizukuManager
 import com.quintz.wifi.ui.components.*
-import com.quintz.wifi.ui.radar.WifiRadarView
+import com.quintz.wifi.ui.graph.WifiGraphView
 import com.quintz.wifi.ui.theme.*
 
 enum class RadioFilter {
@@ -48,13 +52,13 @@ enum class RadioFilter {
 
 enum class RightPaneView {
     SCANNER,
-    RADAR
+    GRAPH
 }
 
 enum class PhoneTab {
     CONTROLS,
     SCANNER,
-    RADAR
+    GRAPH
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -71,16 +75,41 @@ fun MainScreen(viewModel: MainViewModel) {
     val isTileAdded by viewModel.isTileAdded.collectAsState()
 
     var showPasswordDialog by remember { mutableStateOf(false) }
+    var showDiagnosticsDialog by remember { mutableStateOf(false) }
+    var showMacPolicyDialog by remember { mutableStateOf(false) }
+    var targetSsidForMacPolicy by remember { mutableStateOf("") }
+    var pendingLockAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var passwordInput by remember { mutableStateOf("") }
+    var isPasswordVisible by remember { mutableStateOf(false) }
     var targetRadioForPassword by remember { mutableStateOf<AccessPointRadio?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
+
+    fun executeWithMacPolicyCheck(ssid: String, action: () -> Unit) {
+        if (ssid.isEmpty() || viewModel.getMacPolicy(ssid) != null) {
+            action()
+        } else {
+            targetSsidForMacPolicy = ssid
+            pendingLockAction = action
+            showMacPolicyDialog = true
+        }
+    }
+
+    fun logPrimaryWifiControl(source: String, status: WifiStatus): String {
+        val correlationId = DiagnosticLogger.newCorrelationId()
+        val action = if (status.isSteeredOrLocked) "unlock_to_auto" else "prefer_5ghz"
+        DiagnosticLogger.log(
+            "USER_ACTION",
+            "id=$correlationId source=$source callback=connected_hero_primary_button action=$action connected=${status.isConnected} ssid='${status.ssid}' bssid=${status.bssid} band=${status.band.displayName} rssi=${status.rssi} locked=${status.isLockedToBssid} preferred5G=${status.isPreferred5GHz} operating=$isOperating"
+        )
+        return correlationId
+    }
 
     var selectedFilter by rememberSaveable { mutableStateOf(RadioFilter.ALL) }
     var selectedRightPane by rememberSaveable { mutableStateOf(RightPaneView.SCANNER) }
     var selectedPhoneTab by rememberSaveable { mutableStateOf(PhoneTab.CONTROLS) }
 
-    // Radar Sensor Engine from ViewModel (retains calibration & state across rotations)
-    val radarEngine = viewModel.radarEngine
+    // RF Telemetry Graph State from ViewModel
+    val telemetryState by viewModel.telemetryState.collectAsState()
 
     val filteredRadios = remember(radios, selectedFilter) {
         when (selectedFilter) {
@@ -101,17 +130,29 @@ fun MainScreen(viewModel: MainViewModel) {
         containerColor = CliBackground,
         contentWindowInsets = WindowInsets.systemBars,
         snackbarHost = {
-            SnackbarHost(snackbarHostState) { data ->
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier
+                    .navigationBarsPadding()
+                    .padding(bottom = 56.dp, start = 20.dp, end = 20.dp)
+                    .widthIn(max = 520.dp)
+            ) { data ->
                 CliPanel(
                     borderColor = CliBorderActive,
                     containerColor = CliSurfaceElevated,
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
                 ) {
-                    Text(
-                        text = "> ${data.visuals.message}",
-                        style = CliTypography.CodeMono,
-                        color = CliTextPrimary
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        CliStatusDot(color = CliAccentGreen, isPulsing = false)
+                        Text(
+                            text = data.visuals.message,
+                            style = CliTypography.CodeMono,
+                            color = CliTextPrimary
+                        )
+                    }
                 }
             }
         },
@@ -177,19 +218,23 @@ fun MainScreen(viewModel: MainViewModel) {
                                 modifier = Modifier.size(11.dp)
                             )
                         }
-                        Spacer(modifier = Modifier.width(8.dp))
-
-                        IconButton(
-                            onClick = { viewModel.refreshAll() },
-                            enabled = !isOperating && shizukuState.isPermissionGranted,
-                            modifier = Modifier.size(36.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Refresh,
-                                contentDescription = "Refresh Telemetry",
-                                tint = if (isScanning) CliAccentGreen else if (isOperating) CliTextTertiary else CliTextSecondary,
-                                modifier = Modifier.size(18.dp)
-                            )
+                        if (BuildConfig.DEBUG) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(CliAccent24GHzBg)
+                                    .border(1.dp, CliAccent24GHz.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
+                                    .clickable { showDiagnosticsDialog = true }
+                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "DIAG",
+                                    style = CliTypography.BadgeText,
+                                    color = CliAccent24GHz
+                                )
+                            }
                         }
                     }
                 }
@@ -203,11 +248,6 @@ fun MainScreen(viewModel: MainViewModel) {
                 .padding(paddingValues)
         ) {
             val isWideScreen = maxWidth >= 760.dp
-            val isRadarActive = if (isWideScreen) selectedRightPane == RightPaneView.RADAR else selectedPhoneTab == PhoneTab.RADAR
-            LaunchedEffect(isRadarActive) {
-                viewModel.setScannerActive(!isRadarActive)
-                viewModel.setRadarActive(isRadarActive)
-            }
 
             if (isWideScreen) {
                 // ── Two-Pane Mission Control (Tablets & Landscape) ──
@@ -225,26 +265,28 @@ fun MainScreen(viewModel: MainViewModel) {
                             .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
-                        if (!shizukuState.isPermissionGranted) {
-                            CliShizukuBanner(
-                                shizukuState = shizukuState,
-                                onRequestPermission = { viewModel.requestShizukuPermission() },
-                                onOpenShizuku = { ShizukuManager.openShizukuApp(context) },
-                                onOpenPlayStore = { ShizukuManager.openPlayStore(context) }
-                            )
-                        }
 
                         CliConnectedHeroPanel(
                             status = wifiStatus,
                             isOperating = isOperating,
+                            onGetMacPolicy = { viewModel.getMacPolicy(it) },
+                            onToggleMacPolicy = { ssid ->
+                                val current = viewModel.getMacPolicy(ssid) ?: MacAddressPolicy.DEVICE
+                                val next = if (current == MacAddressPolicy.DEVICE) MacAddressPolicy.RANDOMIZED else MacAddressPolicy.DEVICE
+                                viewModel.setMacPolicy(ssid, next)
+                            },
                             onToggleLock = {
-                                if (wifiStatus.isLockedToBssid) {
-                                    viewModel.unlockToAuto()
+                                val source = "main_screen_wide_primary_button"
+                                val correlationId = logPrimaryWifiControl(source, wifiStatus)
+                                if (wifiStatus.isSteeredOrLocked) {
+                                    viewModel.unlockToAuto(source, correlationId)
                                 } else {
                                     val saved = viewModel.getSavedPassword(wifiStatus.ssid)
                                     val isCurrentOpen = wifiStatus.securityType == "0" || wifiStatus.securityType == "open"
                                     if (saved.isNotEmpty() || isCurrentOpen) {
-                                        viewModel.forceLock5Ghz(saved)
+                                        executeWithMacPolicyCheck(wifiStatus.ssid) {
+                                            viewModel.forceLock5Ghz(saved, requestSource = source, correlationId = correlationId)
+                                        }
                                     } else {
                                         passwordInput = ""
                                         targetRadioForPassword = null
@@ -252,12 +294,8 @@ fun MainScreen(viewModel: MainViewModel) {
                                     }
                                 }
                             },
-                            onOpenRadar = { selectedRightPane = RightPaneView.RADAR }
-                        )
-
-                        CliWatchdogPanel(
-                            isActive = watchdogActive,
-                            onToggle = { viewModel.toggleWatchdog(it) }
+                            onOpenGraph = { selectedRightPane = RightPaneView.GRAPH },
+                            isWatchdogActive = watchdogActive
                         )
 
                         CliQuickTilePanel(
@@ -283,7 +321,7 @@ fun MainScreen(viewModel: MainViewModel) {
                         color = CliBorderSubtle
                     )
 
-                    // Right Pane: View Switcher (Scanner vs Radar)
+                    // Right Pane: View Switcher (Scanner vs Telemetry Graph)
                     Column(
                         modifier = Modifier
                             .weight(1.25f)
@@ -310,41 +348,33 @@ fun MainScreen(viewModel: MainViewModel) {
                                         .clickable { selectedRightPane = RightPaneView.SCANNER }
                                         .padding(horizontal = 14.dp, vertical = 8.dp)
                                 ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        if (isScanning && selectedRightPane == RightPaneView.SCANNER) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(6.dp)
-                                                    .clip(CircleShape)
-                                                    .background(CliAccentGreen)
-                                            )
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                        }
-                                        Text(
-                                            text = "AP SCANNER (${radios.size})",
-                                            style = CliTypography.BadgeText,
-                                            color = if (selectedRightPane == RightPaneView.SCANNER) CliTextPrimary else CliTextTertiary
-                                        )
-                                    }
+                                    Text(
+                                        text = "AP SCANNER (${radios.size})",
+                                        style = CliTypography.BadgeText,
+                                        color = if (selectedRightPane == RightPaneView.SCANNER) CliTextPrimary else CliTextTertiary
+                                    )
                                 }
 
                                 Box(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(3.dp))
-                                        .background(if (selectedRightPane == RightPaneView.RADAR) CliSurfaceActive else Color.Transparent)
-                                        .clickable { selectedRightPane = RightPaneView.RADAR }
+                                        .background(if (selectedRightPane == RightPaneView.GRAPH) CliSurfaceActive else Color.Transparent)
+                                        .clickable { selectedRightPane = RightPaneView.GRAPH }
                                         .padding(horizontal = 14.dp, vertical = 8.dp)
                                 ) {
                                     Text(
-                                        text = "WI-FI RADAR",
+                                        text = "RF TELEMETRY",
                                         style = CliTypography.BadgeText,
-                                        color = if (selectedRightPane == RightPaneView.RADAR) CliAccent5GHz else CliTextTertiary
+                                        color = if (selectedRightPane == RightPaneView.GRAPH) CliAccent5GHz else CliTextTertiary
                                     )
                                 }
                             }
 
                             if (selectedRightPane == RightPaneView.SCANNER) {
-                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
                                     CliFilterChip(
                                         label = "ALL (${radios.size})",
                                         isSelected = selectedFilter == RadioFilter.ALL,
@@ -359,6 +389,12 @@ fun MainScreen(viewModel: MainViewModel) {
                                         label = "2.4 GHz",
                                         isSelected = selectedFilter == RadioFilter.BAND_24G,
                                         onClick = { selectedFilter = RadioFilter.BAND_24G }
+                                    )
+                                    CliScannerRefreshButton(
+                                        isScanning = isScanning,
+                                        enabled = !isOperating && shizukuState.isPermissionGranted,
+                                        onRefresh = { viewModel.refreshAll() },
+                                        showLabel = true
                                     )
                                 }
                             }
@@ -400,16 +436,26 @@ fun MainScreen(viewModel: MainViewModel) {
                                                     radio = radio,
                                                     isCurrent = isCurrent,
                                                     onLockClick = {
+                                                        val source = "main_screen_wide_radio_lock"
+                                                        val correlationId = DiagnosticLogger.newCorrelationId()
+                                                        DiagnosticLogger.log(
+                                                            "USER_ACTION",
+                                                            "id=$correlationId source=$source callback=radio_lock_button targetSsid='${radio.ssid}' targetBssid=${radio.bssid} band=${radio.band.displayName} rssi=${radio.rssi} currentSsid='${wifiStatus.ssid}' currentBssid=${wifiStatus.bssid} currentBand=${wifiStatus.band.displayName} currentRssi=${wifiStatus.rssi}"
+                                                        )
                                                         val isOpen = radio.flags.uppercase().let {
                                                             !it.contains("PSK") && !it.contains("SAE") && !it.contains("WEP")
                                                         }
+                                                        val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
                                                         if (isOpen) {
-                                                            viewModel.lockToSpecificRadio(radio, "")
+                                                            executeWithMacPolicyCheck(targetSsid) {
+                                                                viewModel.lockToSpecificRadio(radio, "", requestSource = source, correlationId = correlationId)
+                                                            }
                                                         } else {
-                                                            val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
                                                             val saved = viewModel.getSavedPassword(targetSsid)
                                                             if (saved.isNotEmpty()) {
-                                                                viewModel.lockToSpecificRadio(radio, saved)
+                                                                executeWithMacPolicyCheck(targetSsid) {
+                                                                    viewModel.lockToSpecificRadio(radio, saved, requestSource = source, correlationId = correlationId)
+                                                                }
                                                             } else {
                                                                 targetRadioForPassword = radio
                                                                 passwordInput = ""
@@ -426,13 +472,24 @@ fun MainScreen(viewModel: MainViewModel) {
                                     }
                                 }
 
-                                RightPaneView.RADAR -> {
-                                    WifiRadarView(
-                                        radarEngine = radarEngine,
-                                        onResetCalibration = { radarEngine.resetCalibration() },
-                                        isConnected = wifiStatus.isConnected,
-                                        isShizukuReady = shizukuState.isPermissionGranted,
-                                        onOpenShizuku = { ShizukuManager.launchOrInstall(context) }
+                                RightPaneView.GRAPH -> {
+                                    WifiGraphView(
+                                        state = telemetryState,
+                                        onTogglePause = { viewModel.togglePauseTelemetry() },
+                                        onClearHistory = { viewModel.clearTelemetryHistory() },
+                                        onSelectCandidate = { viewModel.selectCandidateBssid(it) },
+                                        onLockBssid = { bssid ->
+                                            val radio = radios.find { it.bssid.equals(bssid, ignoreCase = true) }
+                                            if (radio != null) {
+                                                val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
+                                                val saved = viewModel.getSavedPassword(targetSsid)
+                                                val correlationId = DiagnosticLogger.newCorrelationId()
+                                                executeWithMacPolicyCheck(targetSsid) {
+                                                    viewModel.lockToSpecificRadio(radio, saved, requestSource = "graph", correlationId = correlationId)
+                                                }
+                                            }
+                                        },
+                                        isConnected = wifiStatus.isConnected
                                     )
                                 }
                             }
@@ -481,37 +538,26 @@ fun MainScreen(viewModel: MainViewModel) {
                                 .padding(vertical = 8.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                if (isScanning && selectedPhoneTab == PhoneTab.SCANNER) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(6.dp)
-                                            .clip(CircleShape)
-                                            .background(CliAccentGreen)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                }
-                                Text(
-                                    text = "SCANNER (${radios.size})",
-                                    style = CliTypography.BadgeText,
-                                    color = if (selectedPhoneTab == PhoneTab.SCANNER) CliTextPrimary else CliTextTertiary
-                                )
-                            }
+                            Text(
+                                text = "SCANNER (${radios.size})",
+                                style = CliTypography.BadgeText,
+                                color = if (selectedPhoneTab == PhoneTab.SCANNER) CliTextPrimary else CliTextTertiary
+                            )
                         }
 
                         Box(
                             modifier = Modifier
                                 .weight(1f)
                                 .clip(RoundedCornerShape(4.dp))
-                                .background(if (selectedPhoneTab == PhoneTab.RADAR) CliSurfaceActive else Color.Transparent)
-                                .clickable { selectedPhoneTab = PhoneTab.RADAR }
+                                .background(if (selectedPhoneTab == PhoneTab.GRAPH) CliSurfaceActive else Color.Transparent)
+                                .clickable { selectedPhoneTab = PhoneTab.GRAPH }
                                 .padding(vertical = 8.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = "RADAR",
+                                text = "TELEMETRY",
                                 style = CliTypography.BadgeText,
-                                color = if (selectedPhoneTab == PhoneTab.RADAR) CliAccent5GHz else CliTextTertiary
+                                color = if (selectedPhoneTab == PhoneTab.GRAPH) CliAccent5GHz else CliTextTertiary
                             )
                         }
                     }
@@ -527,26 +573,28 @@ fun MainScreen(viewModel: MainViewModel) {
                                         .verticalScroll(rememberScrollState()),
                                     verticalArrangement = Arrangement.spacedBy(14.dp)
                                 ) {
-                                    if (!shizukuState.isPermissionGranted) {
-                                        CliShizukuBanner(
-                                            shizukuState = shizukuState,
-                                            onRequestPermission = { viewModel.requestShizukuPermission() },
-                                            onOpenShizuku = { ShizukuManager.openShizukuApp(context) },
-                                            onOpenPlayStore = { ShizukuManager.openPlayStore(context) }
-                                        )
-                                    }
 
                                     CliConnectedHeroPanel(
                                         status = wifiStatus,
                                         isOperating = isOperating,
+                                        onGetMacPolicy = { viewModel.getMacPolicy(it) },
+                                        onToggleMacPolicy = { ssid ->
+                                            val current = viewModel.getMacPolicy(ssid) ?: MacAddressPolicy.DEVICE
+                                            val next = if (current == MacAddressPolicy.DEVICE) MacAddressPolicy.RANDOMIZED else MacAddressPolicy.DEVICE
+                                            viewModel.setMacPolicy(ssid, next)
+                                        },
                                         onToggleLock = {
-                                            if (wifiStatus.isLockedToBssid) {
-                                                viewModel.unlockToAuto()
+                                            val source = "main_screen_controls_primary_button"
+                                            val correlationId = logPrimaryWifiControl(source, wifiStatus)
+                                            if (wifiStatus.isSteeredOrLocked) {
+                                                viewModel.unlockToAuto(source, correlationId)
                                             } else {
                                                 val saved = viewModel.getSavedPassword(wifiStatus.ssid)
                                                 val isCurrentOpen = wifiStatus.securityType == "0" || wifiStatus.securityType == "open"
                                                 if (saved.isNotEmpty() || isCurrentOpen) {
-                                                    viewModel.forceLock5Ghz(saved)
+                                                    executeWithMacPolicyCheck(wifiStatus.ssid) {
+                                                        viewModel.forceLock5Ghz(saved, requestSource = source, correlationId = correlationId)
+                                                    }
                                                 } else {
                                                     passwordInput = ""
                                                     targetRadioForPassword = null
@@ -554,12 +602,8 @@ fun MainScreen(viewModel: MainViewModel) {
                                                 }
                                             }
                                         },
-                                        onOpenRadar = { selectedPhoneTab = PhoneTab.RADAR }
-                                    )
-
-                                    CliWatchdogPanel(
-                                        isActive = watchdogActive,
-                                        onToggle = { viewModel.toggleWatchdog(it) }
+                                        onOpenGraph = { selectedPhoneTab = PhoneTab.GRAPH },
+                                        isWatchdogActive = watchdogActive
                                     )
 
                                     CliQuickTilePanel(
@@ -591,18 +635,12 @@ fun MainScreen(viewModel: MainViewModel) {
                                                 text = "DETECTED RADIOS",
                                                 style = CliTypography.TelemetryLabel
                                             )
-                                            if (isScanning) {
-                                                Spacer(modifier = Modifier.width(8.dp))
-                                                Text(
-                                                    text = "● SCANNING",
-                                                    style = CliTypography.CodeMono,
-                                                    color = CliAccentGreen,
-                                                    fontSize = 10.sp
-                                                )
-                                            }
                                         }
 
-                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Row(
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
                                             CliFilterChip(
                                                 label = "ALL",
                                                 isSelected = selectedFilter == RadioFilter.ALL,
@@ -617,6 +655,12 @@ fun MainScreen(viewModel: MainViewModel) {
                                                 label = "2.4 GHz",
                                                 isSelected = selectedFilter == RadioFilter.BAND_24G,
                                                 onClick = { selectedFilter = RadioFilter.BAND_24G }
+                                            )
+                                            CliScannerRefreshButton(
+                                                isScanning = isScanning,
+                                                enabled = !isOperating && shizukuState.isPermissionGranted,
+                                                onRefresh = { viewModel.refreshAll() },
+                                                showLabel = false
                                             )
                                         }
                                     }
@@ -649,21 +693,31 @@ fun MainScreen(viewModel: MainViewModel) {
                                             verticalArrangement = Arrangement.spacedBy(10.dp)
                                         ) {
                                             items(filteredRadios) { radio ->
-                                                val isCurrent = wifiStatus.isConnected && radio.bssid.equals(wifiStatus.bssid, ignoreCase = true)
-                                                CliRadioRow(
-                                                    radio = radio,
-                                                    isCurrent = isCurrent,
-                                                    onLockClick = {
-                                                        val isOpen = radio.flags.uppercase().let {
+                                            val isCurrent = wifiStatus.isConnected && radio.bssid.equals(wifiStatus.bssid, ignoreCase = true)
+                                            CliRadioRow(
+                                                radio = radio,
+                                                isCurrent = isCurrent,
+                                                onLockClick = {
+                                                    val source = "main_screen_controls_radio_lock"
+                                                    val correlationId = DiagnosticLogger.newCorrelationId()
+                                                    DiagnosticLogger.log(
+                                                        "USER_ACTION",
+                                                        "id=$correlationId source=$source callback=radio_lock_button targetSsid='${radio.ssid}' targetBssid=${radio.bssid} band=${radio.band.displayName} rssi=${radio.rssi} currentSsid='${wifiStatus.ssid}' currentBssid=${wifiStatus.bssid} currentBand=${wifiStatus.band.displayName} currentRssi=${wifiStatus.rssi}"
+                                                    )
+                                                    val isOpen = radio.flags.uppercase().let {
                                                             !it.contains("PSK") && !it.contains("SAE") && !it.contains("WEP")
                                                         }
+                                                        val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
                                                         if (isOpen) {
-                                                            viewModel.lockToSpecificRadio(radio, "")
+                                                        executeWithMacPolicyCheck(targetSsid) {
+                                                            viewModel.lockToSpecificRadio(radio, "", requestSource = source, correlationId = correlationId)
+                                                            }
                                                         } else {
-                                                            val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
                                                             val saved = viewModel.getSavedPassword(targetSsid)
                                                             if (saved.isNotEmpty()) {
-                                                                viewModel.lockToSpecificRadio(radio, saved)
+                                                                executeWithMacPolicyCheck(targetSsid) {
+                                                                    viewModel.lockToSpecificRadio(radio, saved, requestSource = source, correlationId = correlationId)
+                                                                }
                                                             } else {
                                                                 targetRadioForPassword = radio
                                                                 passwordInput = ""
@@ -681,13 +735,24 @@ fun MainScreen(viewModel: MainViewModel) {
                                 }
                             }
 
-                            PhoneTab.RADAR -> {
-                                WifiRadarView(
-                                    radarEngine = radarEngine,
-                                    onResetCalibration = { radarEngine.resetCalibration() },
-                                    isConnected = wifiStatus.isConnected,
-                                    isShizukuReady = shizukuState.isPermissionGranted,
-                                    onOpenShizuku = { ShizukuManager.launchOrInstall(context) }
+                            PhoneTab.GRAPH -> {
+                                WifiGraphView(
+                                    state = telemetryState,
+                                    onTogglePause = { viewModel.togglePauseTelemetry() },
+                                    onClearHistory = { viewModel.clearTelemetryHistory() },
+                                    onSelectCandidate = { viewModel.selectCandidateBssid(it) },
+                                    onLockBssid = { bssid ->
+                                        val radio = radios.find { it.bssid.equals(bssid, ignoreCase = true) }
+                                        if (radio != null) {
+                                            val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
+                                            val saved = viewModel.getSavedPassword(targetSsid)
+                                            val correlationId = DiagnosticLogger.newCorrelationId()
+                                            executeWithMacPolicyCheck(targetSsid) {
+                                                viewModel.lockToSpecificRadio(radio, saved, requestSource = "graph", correlationId = correlationId)
+                                            }
+                                        }
+                                    },
+                                    isConnected = wifiStatus.isConnected
                                 )
                             }
                         }
@@ -699,7 +764,10 @@ fun MainScreen(viewModel: MainViewModel) {
 
     // Industrial Passphrase Prompt Dialog
     if (showPasswordDialog) {
-        Dialog(onDismissRequest = { showPasswordDialog = false }) {
+        Dialog(onDismissRequest = {
+            showPasswordDialog = false
+            isPasswordVisible = false
+        }) {
             CliPanel(
                 borderColor = CliBorderActive,
                 containerColor = CliSurface,
@@ -741,7 +809,20 @@ fun MainScreen(viewModel: MainViewModel) {
                         placeholder = {
                             Text("Enter passphrase :_", style = CliTypography.CodeMono, color = CliTextTertiary)
                         },
-                        visualTransformation = PasswordVisualTransformation(),
+                        visualTransformation = if (isPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(
+                                onClick = { isPasswordVisible = !isPasswordVisible },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (isPasswordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = if (isPasswordVisible) "Hide passphrase" else "Show passphrase",
+                                    tint = if (isPasswordVisible) CliAccent5GHz else CliTextTertiary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        },
                         singleLine = true,
                         textStyle = CliTypography.CodeMono.copy(color = CliTextPrimary),
                         colors = OutlinedTextFieldDefaults.colors(
@@ -773,13 +854,22 @@ fun MainScreen(viewModel: MainViewModel) {
                         variant = CliButtonVariant.Primary,
                         onClick = {
                             if (isTargetOpen || passwordInput.isNotBlank()) {
+                                val source = "main_screen_password_dialog_bind_lock"
+                                val correlationId = DiagnosticLogger.newCorrelationId()
                                 showPasswordDialog = false
                                 val target = targetRadioForPassword
                                 val pass = if (isTargetOpen) "" else passwordInput
-                                if (target != null) {
-                                    viewModel.lockToSpecificRadio(target, pass)
-                                } else {
-                                    viewModel.forceLock5Ghz(pass)
+                                val targetSsid = target?.ssid?.ifEmpty { wifiStatus.ssid } ?: wifiStatus.ssid
+                                DiagnosticLogger.log(
+                                    "USER_ACTION",
+                                    "id=$correlationId source=$source callback=bind_and_lock targetSsid='$targetSsid' targetBssid=${target?.bssid ?: "auto_5ghz"} connected=${wifiStatus.isConnected} currentBssid=${wifiStatus.bssid} band=${wifiStatus.band.displayName} rssi=${wifiStatus.rssi}"
+                                )
+                                executeWithMacPolicyCheck(targetSsid) {
+                                    if (target != null) {
+                                        viewModel.lockToSpecificRadio(target, pass, requestSource = source, correlationId = correlationId)
+                                    } else {
+                                        viewModel.forceLock5Ghz(pass, requestSource = source, correlationId = correlationId)
+                                    }
                                 }
                             }
                         },
@@ -789,84 +879,184 @@ fun MainScreen(viewModel: MainViewModel) {
             }
         }
     }
-}
 
-@Composable
-fun CliShizukuBanner(
-    shizukuState: ShizukuState,
-    onRequestPermission: () -> Unit,
-    onOpenShizuku: () -> Unit,
-    onOpenPlayStore: () -> Unit
-) {
-    val (code, desc) = when {
-        !shizukuState.isInstalled -> Pair(
-            "ERR_SHIZUKU_NOT_INSTALLED",
-            "Shizuku service is required to bypass Android network restrictions and bind BSSIDs."
-        )
-        !shizukuState.isRunning -> Pair(
-            "ERR_SHIZUKU_DAEMON_STOPPED",
-            "Shizuku is installed, but the daemon is not running. Start via Wireless Debugging."
-        )
-        else -> Pair(
-            "SYS_AUTH_REQUIRED",
-            "Grant Shizuku permission to allow Quintz to bind specific BSSIDs."
-        )
+    if (showMacPolicyDialog) {
+        Dialog(onDismissRequest = {
+            showMacPolicyDialog = false
+            pendingLockAction = null
+        }) {
+            CliPanel(
+                borderColor = CliAccent5GHz,
+                containerColor = CliSurface,
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(20.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "MAC ADDRESS IDENTITY",
+                        style = CliTypography.TelemetryLabel,
+                        color = CliAccent5GHz
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Network: $targetSsidForMacPolicy",
+                        style = Typography.headlineSmall,
+                        color = CliTextPrimary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Choose how Android identifies this device on this Wi-Fi network. This choice is remembered per SSID.",
+                        style = Typography.bodyMedium,
+                        color = CliTextSecondary
+                    )
+
+                    Spacer(modifier = Modifier.height(18.dp))
+
+                    CliButton(
+                        text = "USE DEVICE MAC  •  DHCP RESERVATIONS",
+                        variant = CliButtonVariant.Primary,
+                        onClick = {
+                            viewModel.setMacPolicy(targetSsidForMacPolicy, MacAddressPolicy.DEVICE)
+                            showMacPolicyDialog = false
+                            pendingLockAction?.invoke()
+                            pendingLockAction = null
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    CliButton(
+                        text = "USE RANDOMIZED MAC  •  PRIVACY",
+                        variant = CliButtonVariant.Ghost,
+                        onClick = {
+                            viewModel.setMacPolicy(targetSsidForMacPolicy, MacAddressPolicy.RANDOMIZED)
+                            showMacPolicyDialog = false
+                            pendingLockAction?.invoke()
+                            pendingLockAction = null
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+        }
     }
 
-    val isAlert = !shizukuState.isInstalled
-    CliPanel(
-        borderColor = if (isAlert) CliAccentRed.copy(alpha = 0.5f) else CliAccent24GHz.copy(alpha = 0.5f),
-        containerColor = if (isAlert) CliAccentRedBg else CliAccent24GHzBg
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "[$code]",
-                    style = CliTypography.BadgeText,
-                    color = if (isAlert) CliAccentRed else CliAccent24GHz
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = desc,
-                    style = Typography.bodyMedium,
-                    color = CliTextSecondary
-                )
-            }
+    if (BuildConfig.DEBUG && showDiagnosticsDialog) {
+        val currentLogs = remember { mutableStateOf(DiagnosticLogger.getRecentLogs()) }
+        val statusSummary = "SSID: ${wifiStatus.ssid}, BSSID: ${wifiStatus.bssid}, Band: ${wifiStatus.band.displayName}, RSSI: ${wifiStatus.rssi} dBm, Locked: ${wifiStatus.isLockedToBssid}, Shizuku: ${shizukuState.isPermissionGranted}"
+        val report = remember(currentLogs.value) { DiagnosticLogger.buildDiagnosticReport(context, statusSummary) }
 
-            Spacer(modifier = Modifier.width(12.dp))
-
-            when {
-                !shizukuState.isInstalled -> {
-                    CliButton(
-                        text = "GET SHIZUKU ↗",
-                        variant = CliButtonVariant.Primary,
-                        onClick = onOpenPlayStore
-                    )
-                }
-                !shizukuState.isRunning -> {
-                    CliButton(
-                        text = "OPEN SHIZUKU ↗",
-                        variant = CliButtonVariant.Primary,
-                        onClick = onOpenShizuku
-                    )
-                }
-                else -> {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        CliButton(
-                            text = "OPEN ↗",
-                            variant = CliButtonVariant.Ghost,
-                            onClick = onOpenShizuku
+        Dialog(onDismissRequest = { showDiagnosticsDialog = false }) {
+            CliPanel(
+                borderColor = CliAccent24GHz,
+                containerColor = CliSurface,
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(16.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.85f)
+            ) {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "DIAGNOSTICS (DEBUG)",
+                            style = CliTypography.TelemetryLabel,
+                            color = CliAccent24GHz
                         )
-                        CliButton(
-                            text = "GRANT",
-                            variant = CliButtonVariant.Primary,
-                            onClick = onRequestPermission
+                        Text(
+                            text = "${currentLogs.value.size} EVENTS",
+                            style = CliTypography.BadgeText,
+                            color = CliTextSecondary
                         )
                     }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .background(CliSurfaceElevated, RoundedCornerShape(4.dp))
+                            .border(1.dp, CliBorder, RoundedCornerShape(4.dp))
+                            .padding(8.dp)
+                    ) {
+                        if (currentLogs.value.isEmpty()) {
+                            Text(
+                                text = "No diagnostic events recorded yet.",
+                                style = CliTypography.CodeMono,
+                                color = CliTextTertiary
+                            )
+                        } else {
+                            val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+                            LaunchedEffect(currentLogs.value.size) {
+                                if (currentLogs.value.isNotEmpty()) {
+                                    listState.scrollToItem(currentLogs.value.size - 1)
+                                }
+                            }
+                            LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                                items(currentLogs.value) { line ->
+                                    val color = when {
+                                        line.contains("[CRASH]") -> CliAccentRed
+                                        line.contains("✗") -> CliAccentRed
+                                        line.contains("✓") -> CliAccentGreen
+                                        line.contains("[CMD]") -> CliAccent5GHz
+                                        line.contains("[WATCHDOG]") -> CliAccent24GHz
+                                        else -> CliTextSecondary
+                                    }
+                                    Text(
+                                        text = line,
+                                        style = CliTypography.CodeMono.copy(fontSize = 11.sp, lineHeight = 14.sp),
+                                        color = color,
+                                        modifier = Modifier.padding(vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CliButton(
+                            text = "COPY",
+                            variant = CliButtonVariant.Ghost,
+                            onClick = { DiagnosticLogger.copyToClipboard(context, report) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        CliButton(
+                            text = "SHARE",
+                            variant = CliButtonVariant.Primary,
+                            onClick = { DiagnosticLogger.shareReport(context, report) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        CliButton(
+                            text = "CLEAR",
+                            variant = CliButtonVariant.Ghost,
+                            onClick = {
+                                DiagnosticLogger.clearLogs()
+                                currentLogs.value = emptyList()
+                            },
+                            modifier = Modifier.weight(0.8f)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    CliButton(
+                        text = "CLOSE",
+                        variant = CliButtonVariant.Ghost,
+                        onClick = { showDiagnosticsDialog = false },
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
             }
         }
@@ -880,8 +1070,17 @@ fun CliShizukuPanel(
     onOpenPlayStore: () -> Unit,
     onRequestPermission: () -> Unit
 ) {
+    val isAlert = !shizukuState.isInstalled
+    val isWarning = !shizukuState.isPermissionGranted
+    val (cardBorderColor, cardBgColor) = when {
+        isAlert -> Pair(CliAccentRed.copy(alpha = 0.5f), CliAccentRedBg)
+        isWarning -> Pair(CliAccent24GHz.copy(alpha = 0.5f), CliAccent24GHzBg)
+        else -> Pair(CliBorder, CliSurface)
+    }
+
     CliPanel(
-        containerColor = CliSurface,
+        containerColor = cardBgColor,
+        borderColor = cardBorderColor,
         contentPadding = PaddingValues(16.dp)
     ) {
         Row(
@@ -935,7 +1134,7 @@ fun CliShizukuPanel(
                         shizukuState.isPermissionGranted ->
                             "Privileged API active. Quintz executes low-level Wi-Fi steering and BSSID binding without root."
                         shizukuState.isRunning ->
-                            "Daemon is running. Authorize Quintz to unlock BSSID binding and radar telemetry."
+                            "Daemon is running. Authorize Quintz to unlock BSSID binding and RF telemetry."
                         shizukuState.isInstalled ->
                             "App installed, but service daemon is stopped. Start via Wireless Debugging in Shizuku."
                         else ->
@@ -951,25 +1150,30 @@ fun CliShizukuPanel(
             when {
                 !shizukuState.isInstalled -> {
                     CliButton(
-                        text = "INSTALL ↗",
+                        text = "GET SHIZUKU ↗",
                         variant = CliButtonVariant.Primary,
                         onClick = onOpenPlayStore
+                    )
+                }
+                !shizukuState.isRunning -> {
+                    CliButton(
+                        text = "OPEN SHIZUKU ↗",
+                        variant = CliButtonVariant.Primary,
+                        onClick = onOpenShizuku
                     )
                 }
                 !shizukuState.isPermissionGranted -> {
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         CliButton(
                             text = "OPEN ↗",
-                            variant = CliButtonVariant.Ghost,
+                            variant = CliButtonVariant.Outlined,
                             onClick = onOpenShizuku
                         )
-                        if (shizukuState.isRunning) {
-                            CliButton(
-                                text = "GRANT",
-                                variant = CliButtonVariant.Primary,
-                                onClick = onRequestPermission
-                            )
-                        }
+                        CliButton(
+                            text = "GRANT",
+                            variant = CliButtonVariant.Primary,
+                            onClick = onRequestPermission
+                        )
                     }
                 }
                 else -> {
@@ -989,11 +1193,18 @@ fun CliConnectedHeroPanel(
     status: WifiStatus,
     isOperating: Boolean,
     onToggleLock: () -> Unit,
-    onOpenRadar: (() -> Unit)? = null
+    onOpenGraph: (() -> Unit)? = null,
+    onGetMacPolicy: ((String) -> MacAddressPolicy?)? = null,
+    onToggleMacPolicy: ((String) -> Unit)? = null,
+    isWatchdogActive: Boolean = false
 ) {
     val is5G = status.band == BandType.BAND_5_GHZ || status.band == BandType.BAND_6_GHZ
-    val isLocked = status.isLockedToBssid
-    val lockAccent = if (is5G) CliAccent5GHz else CliAccent24GHz
+    val isLocked = status.isSteeredOrLocked
+    val lockAccent = when {
+        status.isPreferred5GHzFallback -> CliAccent24GHz
+        is5G -> CliAccent5GHz
+        else -> CliAccent24GHz
+    }
 
     val borderColor by animateColorAsState(
         targetValue = if (isLocked) lockAccent.copy(alpha = 0.6f) else CliBorder,
@@ -1163,7 +1374,7 @@ fun CliConnectedHeroPanel(
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                 shape = RoundedCornerShape(4.dp)
             ) {
-                // Top Row: Lock/Steer Status (Left) + RADAR Quick-Launch (Right)
+                // Top Row: Lock/Steer Status (Left) + Graph Quick-Launch (Right)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -1173,27 +1384,33 @@ fun CliConnectedHeroPanel(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.weight(1f, fill = false)
                     ) {
+                        val badgeText = when {
+                            status.isLockedToBssid -> "LOCKED TO BSSID"
+                            status.isPreferred5GHz -> "PREFERRED 5 GHz (ROAM ALLOWED)"
+                            status.isPreferred5GHzFallback -> "PREFERRED 5 GHz (FALLBACK ACTIVE)"
+                            else -> "ROUTER AUTO-STEER"
+                        }
                         Icon(
-                            imageVector = if (status.isLockedToBssid) Icons.Default.Lock else Icons.Default.LockOpen,
+                            imageVector = if (status.isLockedToBssid || status.isPreferred5GHz || status.isPreferred5GHzFallback) Icons.Default.Lock else Icons.Default.LockOpen,
                             contentDescription = null,
-                            tint = if (status.isLockedToBssid) lockAccent else CliTextTertiary,
+                            tint = if (status.isSteeredOrLocked) lockAccent else CliTextTertiary,
                             modifier = Modifier.size(13.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = if (status.isLockedToBssid) "LOCKED TO BSSID" else "ROUTER AUTO-STEER",
+                            text = badgeText,
                             style = CliTypography.BadgeText,
-                            color = if (status.isLockedToBssid) lockAccent else CliTextSecondary
+                            color = if (status.isSteeredOrLocked) lockAccent else CliTextSecondary
                         )
                     }
 
-                    if (onOpenRadar != null && status.isConnected) {
+                    if (onOpenGraph != null && status.isConnected) {
                         CliBadge(
-                            text = "RADAR ↗",
+                            text = "GRAPH ↗",
                             accentColor = CliAccent5GHz,
                             backgroundColor = CliAccent5GHzBg,
                             borderColor = CliAccent5GHz.copy(alpha = 0.5f),
-                            modifier = Modifier.clickable { onOpenRadar() }
+                            modifier = Modifier.clickable { onOpenGraph() }
                         )
                     }
                 }
@@ -1220,6 +1437,75 @@ fun CliConnectedHeroPanel(
                         fontSize = 11.5.sp
                     )
                 }
+
+                if (status.isConnected && status.ssid.isNotEmpty() && onGetMacPolicy != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    CliDivider(color = CliBorderSubtle)
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "MAC IDENTITY",
+                            style = CliTypography.TelemetryLabel
+                        )
+
+                        val currentPolicy = onGetMacPolicy(status.ssid) ?: MacAddressPolicy.DEVICE
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(if (currentPolicy == MacAddressPolicy.DEVICE) CliAccent5GHzBg else CliSurface)
+                                .border(1.dp, if (currentPolicy == MacAddressPolicy.DEVICE) CliAccent5GHz.copy(alpha = 0.4f) else CliBorder, RoundedCornerShape(4.dp))
+                                .clickable { onToggleMacPolicy?.invoke(status.ssid) }
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                        ) {
+                            Text(
+                                text = "${currentPolicy.displayName.uppercase()} ⇄",
+                                style = CliTypography.BadgeText,
+                                color = if (currentPolicy == MacAddressPolicy.DEVICE) CliAccent5GHz else CliTextSecondary
+                            )
+                        }
+                    }
+                }
+
+                if (status.isSteeredOrLocked) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    CliDivider(color = CliBorderSubtle)
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "SMART FALLBACK",
+                            style = CliTypography.TelemetryLabel
+                        )
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(if (status.isPreferred5GHzFallback) CliAccent24GHz else if (isWatchdogActive) CliAccentGreen else CliTextTertiary)
+                            )
+                            Text(
+                                text = if (status.isPreferred5GHzFallback) "ACTIVE (Auto-recovery pending)" else if (isWatchdogActive) "ARMED (-82 dBm safety)" else "STANDBY",
+                                style = CliTypography.CodeMono,
+                                color = if (status.isPreferred5GHzFallback) CliAccent24GHz else if (isWatchdogActive) CliAccentGreen else CliTextTertiary,
+                                fontSize = 11.5.sp
+                            )
+                        }
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -1230,7 +1516,7 @@ fun CliConnectedHeroPanel(
                 enabled = !isOperating,
                 loading = isOperating,
                 variant = if (isLocked) CliButtonVariant.Outlined else CliButtonVariant.Primary,
-                text = if (isOperating) "SWITCHING BAND..." else if (isLocked) "UNLOCK TO AUTO-ROAM" else "LOCK TO 5 GHz BSSID",
+                text = if (isOperating) "SWITCHING BAND..." else if (isLocked) "UNLOCK TO AUTO-ROAM" else "PREFER 5 GHz (ROAM ALLOWED)",
                 modifier = Modifier.fillMaxWidth()
             )
         }
@@ -1260,47 +1546,6 @@ fun CliTelemetryMetric(
     }
 }
 
-@Composable
-fun CliWatchdogPanel(
-    isActive: Boolean,
-    onToggle: (Boolean) -> Unit
-) {
-    CliPanel(
-        containerColor = CliSurface,
-        contentPadding = PaddingValues(16.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "SMART FALLBACK WATCHDOG",
-                    style = CliTypography.TelemetryLabel
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "Auto-unlocks to 2.4 GHz if 5 GHz signal drops below -82 dBm to safeguard internet access.",
-                    style = Typography.bodyMedium,
-                    color = CliTextSecondary
-                )
-            }
-            Spacer(modifier = Modifier.width(16.dp))
-            Switch(
-                checked = isActive,
-                onCheckedChange = onToggle,
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = CliButtonPrimary,
-                    checkedTrackColor = CliAccent5GHz,
-                    uncheckedThumbColor = CliTextTertiary,
-                    uncheckedTrackColor = CliSurfaceElevated,
-                    uncheckedBorderColor = CliBorder
-                )
-            )
-        }
-    }
-}
 
 @Composable
 fun CliQuickTilePanel(

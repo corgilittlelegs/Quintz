@@ -9,11 +9,14 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -323,5 +326,69 @@ fun CliFilterChip(
             color = if (isSelected) CliAccent5GHz else CliTextSecondary,
             modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
         )
+    }
+}
+
+/**
+ * Industrial CLI Scanner Refresh Button.
+ * Used exclusively in the AP Scanner header in portrait and landscape modes.
+ */
+@Composable
+fun CliScannerRefreshButton(
+    isScanning: Boolean,
+    enabled: Boolean,
+    onRefresh: () -> Unit,
+    showLabel: Boolean = false,
+    modifier: Modifier = Modifier
+) {
+    val haptic = LocalHapticFeedback.current
+    val infiniteTransition = rememberInfiniteTransition(label = "scannerRefreshSpin")
+    val rotation by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 800, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "scannerRefreshAngle"
+    )
+
+    Surface(
+        modifier = modifier
+            .clip(RoundedCornerShape(4.dp))
+            .border(
+                1.dp,
+                if (isScanning) CliAccentGreen.copy(alpha = 0.6f) else CliBorder,
+                RoundedCornerShape(4.dp)
+            )
+            .clickable(enabled = enabled) {
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                onRefresh()
+            },
+        shape = RoundedCornerShape(4.dp),
+        color = if (isScanning) CliAccentGreenBg else CliSurfaceElevated,
+        contentColor = if (isScanning) CliAccentGreen else if (!enabled) CliTextTertiary else CliTextSecondary
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = if (showLabel) 8.dp else 6.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Refresh,
+                contentDescription = "Scan Nearby Radios",
+                tint = if (isScanning) CliAccentGreen else if (!enabled) CliTextTertiary else CliTextSecondary,
+                modifier = Modifier
+                    .size(12.dp)
+                    .then(if (isScanning) Modifier.rotate(rotation) else Modifier)
+            )
+            if (showLabel) {
+                Text(
+                    text = if (isScanning) "SCANNING" else "SCAN",
+                    style = CliTypography.BadgeText,
+                    color = if (isScanning) CliAccentGreen else if (!enabled) CliTextTertiary else CliTextSecondary
+                )
+            }
+        }
     }
 }

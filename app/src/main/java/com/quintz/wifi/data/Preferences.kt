@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.quintz.wifi.model.MacAddressPolicy
 
 class Preferences(context: Context) {
 
@@ -36,6 +37,22 @@ class Preferences(context: Context) {
         prefs.edit().remove("pwd_$ssid").apply()
     }
 
+    fun getMacPolicy(ssid: String): MacAddressPolicy? {
+        val raw = prefs.getString("mac_policy_$ssid", null) ?: return null
+        return runCatching { MacAddressPolicy.valueOf(raw) }.getOrNull()
+    }
+
+    fun setMacPolicy(ssid: String, policy: MacAddressPolicy) {
+        prefs.edit().putString("mac_policy_$ssid", policy.name).apply()
+    }
+
+    var defaultMacPolicy: MacAddressPolicy
+        get() {
+            val raw = prefs.getString("default_mac_policy", MacAddressPolicy.DEVICE.name)
+            return runCatching { MacAddressPolicy.valueOf(raw ?: MacAddressPolicy.DEVICE.name) }.getOrDefault(MacAddressPolicy.DEVICE)
+        }
+        set(value) = prefs.edit().putString("default_mac_policy", value.name).apply()
+
     var isWatchdogEnabled: Boolean
         get() = prefs.getBoolean("watchdog_enabled", false)
         set(value) = prefs.edit().putBoolean("watchdog_enabled", value).apply()
@@ -45,14 +62,36 @@ class Preferences(context: Context) {
         set(value) = prefs.edit().putString("last_target_band", value).apply()
 
     var fallbackThresholdRssi: Int
-        get() = prefs.getInt("fallback_threshold", -82)
+        get() {
+            val v = prefs.getInt("fallback_threshold", -75)
+            return if (v < -75) -75 else v
+        }
         set(value) = prefs.edit().putInt("fallback_threshold", value).apply()
 
     var recoveryThresholdRssi: Int
-        get() = prefs.getInt("recovery_threshold", -70)
-        set(value) = prefs.edit().putInt("recovery_threshold", value).apply()
+        get() {
+            val v = prefs.getInt("recovery_threshold", -72)
+            if (v == -65 && !prefs.contains("recovery_threshold_user_modified")) {
+                return -72
+            }
+            return if (v < -85) -85 else v
+        }
+        set(value) {
+            prefs.edit()
+                .putInt("recovery_threshold", value)
+                .putBoolean("recovery_threshold_user_modified", true)
+                .apply()
+        }
 
     var isQuickTileAdded: Boolean
         get() = prefs.getBoolean("quick_tile_added", false)
         set(value) = prefs.edit().putBoolean("quick_tile_added", value).apply()
+
+    var watchdogLastSsid: String?
+        get() = prefs.getString("watchdog_last_ssid", null)
+        set(value) = prefs.edit().putString("watchdog_last_ssid", value).apply()
+
+    var isWatchdogFallbackActive: Boolean
+        get() = prefs.getBoolean("watchdog_fallback_active", false)
+        set(value) = prefs.edit().putBoolean("watchdog_fallback_active", value).apply()
 }
