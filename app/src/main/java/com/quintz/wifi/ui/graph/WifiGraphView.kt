@@ -14,16 +14,19 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.*
@@ -69,6 +72,7 @@ fun WifiGraphView(
     isConnected: Boolean = true
 ) {
     val textMeasurer = rememberTextMeasurer()
+    val haptic = LocalHapticFeedback.current
 
     CliPanel(
         modifier = modifier
@@ -106,31 +110,57 @@ fun WifiGraphView(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                CliButton(
-                    onClick = onTogglePause,
-                    text = if (state.isPaused) "LIVE" else "PAUSE",
-                    variant = if (state.isPaused) CliButtonVariant.Primary else CliButtonVariant.Outlined,
-                    leadingIcon = {
+                // Pause / Resume Icon Button
+                Surface(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .border(
+                            1.dp,
+                            if (state.isPaused) CliAccent24GHz.copy(alpha = 0.6f) else CliBorder,
+                            RoundedCornerShape(6.dp)
+                        )
+                        .clickable {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onTogglePause()
+                        },
+                    shape = RoundedCornerShape(6.dp),
+                    color = if (state.isPaused) CliAccent24GHzBg else CliSurfaceElevated,
+                    contentColor = if (state.isPaused) CliAccent24GHz else CliTextSecondary
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
                         Icon(
                             imageVector = if (state.isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
                             contentDescription = if (state.isPaused) "Resume" else "Pause",
-                            modifier = Modifier.size(14.dp)
+                            tint = if (state.isPaused) CliAccent24GHz else CliTextSecondary,
+                            modifier = Modifier.size(16.dp)
                         )
                     }
-                )
+                }
 
-                CliButton(
-                    onClick = onClearHistory,
-                    text = "CLEAR",
-                    variant = CliButtonVariant.Outlined,
-                    leadingIcon = {
+                // Clear History Icon Button
+                Surface(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .border(1.dp, CliBorder, RoundedCornerShape(6.dp))
+                        .clickable {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onClearHistory()
+                        },
+                    shape = RoundedCornerShape(6.dp),
+                    color = CliSurfaceElevated,
+                    contentColor = CliTextSecondary
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
                         Icon(
-                            imageVector = Icons.Default.Refresh,
+                            imageVector = Icons.Default.DeleteSweep,
                             contentDescription = "Clear History",
-                            modifier = Modifier.size(14.dp)
+                            tint = CliTextSecondary,
+                            modifier = Modifier.size(17.dp)
                         )
                     }
-                )
+                }
             }
         }
 

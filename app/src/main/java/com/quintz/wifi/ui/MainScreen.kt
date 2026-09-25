@@ -3,6 +3,7 @@ package com.quintz.wifi.ui
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -14,6 +15,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -25,6 +27,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -33,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.quintz.wifi.BuildConfig
+import com.quintz.wifi.R
 import com.quintz.wifi.core.DiagnosticLogger
 import com.quintz.wifi.model.AccessPointRadio
 import com.quintz.wifi.model.BandType
@@ -162,78 +166,90 @@ fun MainScreen(viewModel: MainViewModel) {
                     .fillMaxWidth()
                     .background(CliBackground)
                     .windowInsetsPadding(WindowInsets.statusBars)
-                    .padding(top = 8.dp)
+                    .padding(top = 4.dp)
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 8.dp),
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // Left: Integrated Logo Wordmark ([Q]uintz)
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        CliStatusDot(
-                            color = if (shizukuState.isPermissionGranted) CliAccentGreen else CliAccent24GHz,
-                            isPulsing = isOperating
+                        Image(
+                            painter = painterResource(R.drawable.ic_qs_tile),
+                            contentDescription = "Quintz Logo",
+                            modifier = Modifier.size(26.dp)
                         )
-                        Spacer(modifier = Modifier.width(10.dp))
+                        Spacer(modifier = Modifier.width(2.dp))
                         Text(
-                            text = "Quintz",
+                            text = "uintz",
                             fontFamily = InterFamily,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 17.sp,
-                            letterSpacing = (-0.3).sp,
+                            fontSize = 24.sp,
+                            letterSpacing = (-0.5).sp,
                             color = CliTextPrimary
                         )
                     }
 
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        // Interactive Shizuku Status Badge: click jumps directly into Shizuku or Play Store
+                    // Right: Tactile Shizuku Status Badge & Optional Debug Diagnostics
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         val shizukuBadgeColor = if (shizukuState.isPermissionGranted) CliAccentGreen else CliAccent24GHz
                         val shizukuBadgeBg = if (shizukuState.isPermissionGranted) CliAccentGreenBg else CliAccent24GHzBg
-                        Row(
+                        Surface(
                             modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(shizukuBadgeBg)
-                                .border(1.dp, shizukuBadgeColor.copy(alpha = 0.4f), RoundedCornerShape(4.dp))
-                                .clickable { ShizukuManager.launchOrInstall(context) }
-                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                                .clip(RoundedCornerShape(6.dp))
+                                .border(1.dp, shizukuBadgeColor.copy(alpha = 0.45f), RoundedCornerShape(6.dp))
+                                .clickable { ShizukuManager.launchOrInstall(context) },
+                            shape = RoundedCornerShape(6.dp),
+                            color = shizukuBadgeBg
                         ) {
-                            Text(
-                                text = when {
-                                    shizukuState.isPermissionGranted -> "SHIZUKU OK"
-                                    shizukuState.isRunning -> "AUTH NEEDED"
-                                    shizukuState.isInstalled -> "DAEMON OFF"
-                                    else -> "GET SHIZUKU"
-                                },
-                                style = CliTypography.BadgeText,
-                                color = shizukuBadgeColor
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Icon(
-                                imageVector = Icons.Default.OpenInNew,
-                                contentDescription = "Open Shizuku",
-                                tint = shizukuBadgeColor,
-                                modifier = Modifier.size(11.dp)
-                            )
-                        }
-                        if (BuildConfig.DEBUG) {
-                            Spacer(modifier = Modifier.width(8.dp))
                             Row(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(CliAccent24GHzBg)
-                                    .border(1.dp, CliAccent24GHz.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
-                                    .clickable { showDiagnosticsDialog = true }
-                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = "DIAG",
+                                    text = when {
+                                        shizukuState.isPermissionGranted -> "SHIZUKU OK"
+                                        shizukuState.isRunning -> "AUTH NEEDED"
+                                        shizukuState.isInstalled -> "DAEMON OFF"
+                                        else -> "GET SHIZUKU"
+                                    },
                                     style = CliTypography.BadgeText,
-                                    color = CliAccent24GHz
+                                    color = shizukuBadgeColor
                                 )
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                                    contentDescription = "Open Shizuku",
+                                    tint = shizukuBadgeColor,
+                                    modifier = Modifier.size(12.dp)
+                                )
+                            }
+                        }
+                        if (BuildConfig.DEBUG) {
+                            Surface(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .border(1.dp, CliAccent24GHz.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
+                                    .clickable { showDiagnosticsDialog = true },
+                                shape = RoundedCornerShape(6.dp),
+                                color = CliAccent24GHzBg
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "DIAG",
+                                        style = CliTypography.BadgeText,
+                                        color = CliAccent24GHz
+                                    )
+                                }
                             }
                         }
                     }
