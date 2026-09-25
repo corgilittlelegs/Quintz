@@ -22,6 +22,7 @@ import com.quintz.wifi.R
 import com.quintz.wifi.core.DiagnosticLogger
 import com.quintz.wifi.core.WifiController
 import com.quintz.wifi.data.Preferences
+import com.quintz.wifi.data.WifiTargetMode
 import com.quintz.wifi.model.BandType
 import com.quintz.wifi.model.WifiStatus
 import com.quintz.wifi.shizuku.ShizukuManager
@@ -63,7 +64,7 @@ class WatchdogService : Service() {
             val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
             if (wm?.isWifiEnabled != true) return // User toggled Wi-Fi off intentionally
 
-            if (prefs.lastTargetBand == "5GHz" || prefs.isWatchdogFallbackActive) {
+            if (prefs.watchdogLastSsid?.let { prefs.getOrMigrateWifiTargetMode(it) } != WifiTargetMode.AUTO) {
                 scope.launch {
                     handlePotentialDisconnect("networkCallback.onLost")
                 }
@@ -78,13 +79,9 @@ class WatchdogService : Service() {
             val is24Ghz = wifiInfo.frequency in 2400..2500
 
             // If the Qualcomm driver gracefully roamed to 2.4 GHz while 5GHz is targeted, update status immediately
-            if (is24Ghz && prefs.lastTargetBand == "5GHz") {
-                val cleanSsid = wifiInfo.ssid?.replace("\"", "").orEmpty()
-                val effectiveSsid = if (cleanSsid.isNotEmpty() && !cleanSsid.equals("<unknown ssid>", ignoreCase = true)) {
-                    cleanSsid
-                } else {
-                    prefs.watchdogLastSsid.orEmpty()
-                }
+            val cleanSsid = wifiInfo.ssid?.replace("\"", "").orEmpty()
+            val effectiveSsid = if (cleanSsid.isNotEmpty() && !cleanSsid.equals("<unknown ssid>", ignoreCase = true)) cleanSsid else prefs.watchdogLastSsid.orEmpty()
+            if (is24Ghz && effectiveSsid.isNotEmpty() && prefs.getOrMigrateWifiTargetMode(effectiveSsid) == WifiTargetMode.PREFER_5_GHZ) {
                 updateNotification("Graceful 2.4 GHz fallback • ${effectiveSsid.ifEmpty { "Archer" }}")
             }
         }
@@ -133,16 +130,26 @@ class WatchdogService : Service() {
                 updateNotification("Wi-Fi disconnected • Monitoring...")
 
                 if (targetSsid.isNotEmpty()) {
+                    val targetMode = prefs.getOrMigrateWifiTargetMode(targetSsid)
                     val savedPassword = prefs.getPassword(targetSsid)
                     val correlationId = DiagnosticLogger.newCorrelationId()
-                    DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId source=watchdog_disconnect_fallback action=unlock_to_auto targetSsid='$targetSsid'")
-                    controller.unlockToAuto(
-                        targetSsid,
-                        savedPassword,
-                        isAutomatedFallback = true,
-                        requestSource = "watchdog_disconnect_fallback",
-                        correlationId = correlationId
-                    )
+                    if (targetMode == WifiTargetMode.PIN_BSSID) {
+                        val pinnedBssid = prefs.getPinnedBssid(targetSsid)
+                        val radios = controller.scanRadios(correlationId, freshForSsid = targetSsid, freshForBssid = pinnedBssid)
+                        val target = radios.firstOrNull {
+                            it.bssid.equals(pinnedBssid, ignoreCase = true) && it.ssid.equals(targetSsid, ignoreCase = true) && it.ageSeconds <= 8L
+                        }
+                        val isOpen = target?.flags?.uppercase()?.let { !it.contains("PSK") && !it.contains("SAE") && !it.contains("WEP") } == true
+                        if (target != null && target.rssi >= prefs.recoveryThresholdRssi && (savedPassword != null || isOpen)) {
+                            DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId source=watchdog_disconnect_fallback action=restore_bssid_pin targetSsid='$targetSsid' targetBssid=${target.bssid}")
+                            controller.lockToBssid(targetSsid, target.bssid, savedPassword.orEmpty(), requestSource = "watchdog_disconnect_restore_pin", correlationId = correlationId)
+                        } else {
+                            DiagnosticLogger.log("WATCHDOG", "disconnect recovery skipped reason=pinned_target_unavailable targetSsid='$targetSsid' pinnedBssid=${pinnedBssid.orEmpty()}")
+                        }
+                    } else if (targetMode == WifiTargetMode.PREFER_5_GHZ) {
+                        DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId source=watchdog_disconnect_fallback action=unlock_to_auto targetSsid='$targetSsid'")
+                        controller.unlockToAuto(targetSsid, savedPassword, isAutomatedFallback = true, requestSource = "watchdog_disconnect_fallback", correlationId = correlationId)
+                    }
                 }
             }
         } finally {
@@ -157,12 +164,17 @@ class WatchdogService : Service() {
             "Device connected ($contextDesc): SSID='${status.ssid}', band=${status.band.displayName}, rssi=${status.rssi} dBm. Link preserved."
         )
         if (targetSsid.isEmpty() || status.ssid.equals(targetSsid, ignoreCase = true)) {
-            if (status.band == BandType.BAND_2_4_GHZ) {
+            val mode = prefs.getOrMigrateWifiTargetMode(status.ssid, status.lockedBssid.takeIf { status.isLockedToBssid })
+            if (status.band == BandType.BAND_2_4_GHZ && mode == WifiTargetMode.PREFER_5_GHZ) {
                 prefs.isWatchdogFallbackActive = true
                 updateNotification("Graceful 2.4 GHz fallback • ${status.ssid}")
             } else {
                 prefs.isWatchdogFallbackActive = false
-                val label = if (status.isLockedToBssid) "Locked to BSSID" else "Preferred 5 GHz (Roam Allowed)"
+                val label = when (mode) {
+                    WifiTargetMode.PIN_BSSID -> "Pinned to BSSID"
+                    WifiTargetMode.PREFER_5_GHZ -> "Preferred 5 GHz (Roam Allowed)"
+                    WifiTargetMode.AUTO -> "Auto-Roam"
+                }
                 updateNotification("$label • ${status.ssid} (${status.rssi} dBm)")
             }
         } else {
@@ -234,20 +246,34 @@ class WatchdogService : Service() {
                     try {
                         val status = controller.refreshStatus()
                         if (status.isConnected && status.ssid.isNotEmpty()) {
+                            val targetMode = prefs.getOrMigrateWifiTargetMode(
+                                status.ssid,
+                                status.lockedBssid.takeIf { status.isLockedToBssid }
+                            )
                             lastKnownSsid = status.ssid
                             prefs.watchdogLastSsid = status.ssid
                             val savedPassword = prefs.getPassword(status.ssid)
+                            val pinnedBssid = prefs.getPinnedBssid(status.ssid)
+                            val onDesiredTarget = when (targetMode) {
+                                WifiTargetMode.AUTO -> true
+                                WifiTargetMode.PREFER_5_GHZ -> status.band == BandType.BAND_5_GHZ || status.band == BandType.BAND_6_GHZ
+                                WifiTargetMode.PIN_BSSID -> status.isLockedToBssid && status.bssid.equals(pinnedBssid, ignoreCase = true)
+                            }
 
-                            if (status.band == BandType.BAND_5_GHZ || status.band == BandType.BAND_6_GHZ) {
-                                // Healthy on 5 GHz: profile is unpinned, so hardware will roam gracefully to 2.4 GHz if signal dips
+                            if (onDesiredTarget) {
+                                // The saved state already matches this network's requested behavior.
                                 fallbackScanInterval = 12000L
                                 prefs.isWatchdogFallbackActive = false
                                 candidateObservations.clear()
                                 switchCooldownMs = 60000L
-                                val label = if (status.isLockedToBssid) "Locked to BSSID" else "Preferred 5 GHz (Roam Allowed)"
+                                val label = when (targetMode) {
+                                    WifiTargetMode.PIN_BSSID -> "Pinned to BSSID"
+                                    WifiTargetMode.PREFER_5_GHZ -> "Preferred 5 GHz (Roam Allowed)"
+                                    WifiTargetMode.AUTO -> "Auto-Roam"
+                                }
                                 updateNotification("$label • ${status.ssid} (${status.rssi} dBm)")
-                            } else if (prefs.lastTargetBand == "5GHz" || prefs.isWatchdogFallbackActive) {
-                                // In fallback mode or caught in silent OEM drift: scan to check if 5 GHz is strong again
+                            } else if (targetMode == WifiTargetMode.PREFER_5_GHZ || targetMode == WifiTargetMode.PIN_BSSID) {
+                                // Restore the explicit per-network target after a fallback or unexpected roam.
                                 loopDelay = fallbackScanInterval
                                 val now = System.currentTimeMillis()
                                 val timeSinceLastAttempt = now - last5GSwitchAttemptTimeMs
@@ -262,11 +288,16 @@ class WatchdogService : Service() {
                                     updateNotification("$modeDesc (${status.ssid}) • Cooldown ${remainingSec}s")
                                 } else {
                                     transitionMutex.withLock {
-                                        val radios = controller.scanRadios(freshForSsid = status.ssid)
+                                        val radios = controller.scanRadios(
+                                            freshForSsid = status.ssid,
+                                            freshForBssid = pinnedBssid.takeIf { targetMode == WifiTargetMode.PIN_BSSID }
+                                        )
                                         val threshold = prefs.recoveryThresholdRssi
                                         val sameNetworkRadios = radios.filter {
-                                            it.ssid.equals(status.ssid, ignoreCase = true) &&
-                                                    (it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ)
+                                            it.ssid.equals(status.ssid, ignoreCase = true) && when (targetMode) {
+                                                WifiTargetMode.PIN_BSSID -> it.bssid.equals(pinnedBssid, ignoreCase = true)
+                                                else -> it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ
+                                            }
                                         }
                                         val eligibleRadios = sameNetworkRadios.filter {
                                             it.rssi >= threshold && it.ageSeconds <= 8L
@@ -284,7 +315,7 @@ class WatchdogService : Service() {
                                             if (rejectionReason != null) {
                                                 DiagnosticLogger.log(
                                                     "WATCHDOG",
-                                                    "5 GHz candidate rejected reason=$rejectionReason bssid=${radio.bssid} rssi=${radio.rssi}dBm threshold=${threshold}dBm age=${radio.ageSeconds}s ssid='${radio.ssid}'"
+                                                    "Target candidate rejected reason=$rejectionReason mode=${targetMode.name} bssid=${radio.bssid} rssi=${radio.rssi}dBm threshold=${threshold}dBm age=${radio.ageSeconds}s ssid='${radio.ssid}'"
                                                 )
                                             }
                                         }
@@ -305,7 +336,7 @@ class WatchdogService : Service() {
                                             val currentObservation = candidateObservations.getValue(key)
                                             DiagnosticLogger.log(
                                                 "WATCHDOG",
-                                                "5 GHz candidate bssid=${radio.bssid} observation=${currentObservation.observations}/2 rssi=${radio.rssi}dBm age=${radio.ageSeconds}s elapsedSincePrior=${elapsedSincePriorMs ?: -1L}ms"
+                                                "Target candidate mode=${targetMode.name} bssid=${radio.bssid} observation=${currentObservation.observations}/2 rssi=${radio.rssi}dBm age=${radio.ageSeconds}s elapsedSincePrior=${elapsedSincePriorMs ?: -1L}ms"
                                             )
                                         }
 
@@ -322,13 +353,13 @@ class WatchdogService : Service() {
                                                     "WATCHDOG",
                                                     "5 GHz recovery deferred reason=saved_password_missing ssid='${status.ssid}' bssid=${verified5G.bssid} rssi=${verified5G.rssi}dBm"
                                                 )
-                                                updateNotification("5 GHz is strong • Save network password to recover")
+                                                updateNotification("Target AP is strong • Save network password to recover")
                                             } else {
                                                 DiagnosticLogger.log(
                                                     "WATCHDOG",
                                                     "5 GHz candidate verified across repeated distinct scans. Returning to preferred band: ${verified5G.bssid} (${verified5G.rssi} dBm), current link ${status.band.displayName} at ${status.rssi} dBm."
                                                 )
-                                                updateNotification("Returning to verified 5 GHz (${verified5G.rssi} dBm)...")
+                                                updateNotification("Returning to verified target AP (${verified5G.rssi} dBm)...")
                                                 last5GSwitchAttemptTimeMs = System.currentTimeMillis()
                                                 val correlationId = DiagnosticLogger.newCorrelationId()
                                                 DiagnosticLogger.log(
@@ -340,7 +371,7 @@ class WatchdogService : Service() {
                                                     status.ssid,
                                                     verified5G.bssid,
                                                     savedPassword.orEmpty(),
-                                                    unpinProfileForRoaming = true,
+                                                    unpinProfileForRoaming = targetMode == WifiTargetMode.PREFER_5_GHZ,
                                                     deferIfHealthy24Ghz = true,
                                                     allowSwitchFromHealthy24Ghz = true,
                                                     requestSource = "watchdog_5ghz_recovery",
@@ -397,7 +428,7 @@ class WatchdogService : Service() {
                                                     "WATCHDOG",
                                                     "5 GHz recovery waiting reason=second_observation ssid='${status.ssid}' bestBssid=${bestObserved.bssid} rssi=${bestObserved.rssi}dBm age=${bestObserved.ageSeconds}s observation=$observationCount/2 threshold=${threshold}dBm"
                                                 )
-                                                updateNotification("Observing 5 GHz (${bestObserved.rssi} dBm, $observationCount/2) • ${status.ssid}")
+                                                    updateNotification("Observing target AP (${bestObserved.rssi} dBm, $observationCount/2) • ${status.ssid}")
                                             }
                                         }
                                     }

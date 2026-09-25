@@ -26,6 +26,7 @@ Quintz leverages the **[Shizuku](https://shizuku.rikka.app)** privileged API bri
 - Selects a strong 5 GHz / 6 GHz BSSID on your network, then keeps the saved profile available for roaming.
 - The preferred-band action is not a permanent BSSID pin: Android and the Wi-Fi firmware can still roam to another BSSID or band when conditions require it.
 - Use a specific BSSID lock when you need to keep the profile pinned to one access point.
+- Quintz stores Auto, Prefer 5 GHz, or Pin BSSID intent per SSID, so changing one network does not change the watchdog target for another.
 - Supports WPA2-Personal, WPA3-SAE, Enhanced Open (OWE), and open networks.
 - Uses Shizuku to interface safely with Android's system Wi-Fi service.
 
@@ -35,6 +36,7 @@ Quintz leverages the **[Shizuku](https://shizuku.rikka.app)** privileged API bri
 - When the device is connected to the target SSID on 2.4 GHz, the watchdog scans for a same-SSID 5 GHz / 6 GHz BSSID. The default recovery threshold is `-72 dBm`.
 - A successful `start-scan` command only means Android accepted the request. Quintz waits up to 12 seconds for evidence that the target network's 5/6 GHz scan result refreshed, and excludes those candidates if it did not.
 - Recovery requires the same eligible BSSID in two fresh observations at least 10 seconds apart. If confirmed, Quintz requests a BSSID-specific transition, verifies that the target BSSID became active, then unpins the saved profile again so roaming remains allowed.
+- For a pinned network, the watchdog monitors and restores that exact BSSID (on either band), then verifies the hard profile pin. Auto mode does not trigger band or BSSID recovery.
 - The recovery scan interval starts at about 12 seconds and backs off to 30 seconds when no eligible candidate is found or a recovery attempt fails. Failed switch attempts also receive a retry cooldown that increases from 60 seconds up to 5 minutes.
 - Recovery for secured networks requires Quintz to have the network password saved. A missing password, unavailable Shizuku service, stale scan results, or Android/OEM behavior can prevent or delay a switch; recovery is not guaranteed to be seamless.
 
@@ -56,7 +58,7 @@ Quintz leverages the **[Shizuku](https://shizuku.rikka.app)** privileged API bri
 ### 📊 AP Scanner & Channel Analyzer
 - Scans and lists all nearby access points, frequencies, channel numbers, and MACs.
 - Clear indicators for Wi-Fi standards (**11n**, **11ac**, **11ax**, **Wi-Fi 7**).
-- 1-tap **`BIND`** button to pin connection to any specific radio or access point.
+- 1-tap **`BIND`** button to pin connection to any specific radio or access point; the connected AP stays actionable until it is actually pinned. Rows distinguish **CONNECTED** from **PINNED**.
 
 ### ⚡ Quick Settings Tile
 - 1-tap lock and unlock directly from the Android Quick Settings shade without launching the full application.

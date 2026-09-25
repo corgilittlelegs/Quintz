@@ -495,7 +495,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             refreshAll()
             if (success) {
                 _message.value = "Locked to AP [${radio.bssid}] on ${radio.band.displayName} (${policy.displayName})"
-                if (!prefs.isWatchdogEnabled && (radio.band == BandType.BAND_5_GHZ || radio.band == BandType.BAND_6_GHZ)) {
+                if (!prefs.isWatchdogEnabled) {
                     toggleWatchdog(true)
                 }
             } else {

@@ -6,6 +6,8 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.quintz.wifi.model.MacAddressPolicy
 
+enum class WifiTargetMode { AUTO, PREFER_5_GHZ, PIN_BSSID }
+
 class Preferences(context: Context) {
 
     private val prefs: SharedPreferences = try {
@@ -60,6 +62,39 @@ class Preferences(context: Context) {
     var lastTargetBand: String
         get() = prefs.getString("last_target_band", "5GHz") ?: "5GHz"
         set(value) = prefs.edit().putString("last_target_band", value).apply()
+
+    fun getWifiTargetMode(ssid: String): WifiTargetMode? =
+        prefs.getString("wifi_target_mode_$ssid", null)?.let { runCatching { WifiTargetMode.valueOf(it) }.getOrNull() }
+
+    fun setWifiTargetMode(ssid: String, mode: WifiTargetMode, pinnedBssid: String? = null) {
+        prefs.edit()
+            .putString("wifi_target_mode_$ssid", mode.name)
+            .apply {
+                if (mode == WifiTargetMode.PIN_BSSID && !pinnedBssid.isNullOrBlank()) {
+                    putString("wifi_pinned_bssid_$ssid", pinnedBssid.lowercase())
+                } else {
+                    remove("wifi_pinned_bssid_$ssid")
+                }
+            }
+            .apply()
+    }
+
+    fun getPinnedBssid(ssid: String): String? = prefs.getString("wifi_pinned_bssid_$ssid", null)
+
+    /** Initializes per-network intent from the legacy global preference and observed profile. */
+    fun getOrMigrateWifiTargetMode(ssid: String, profileBssid: String? = null): WifiTargetMode {
+        getWifiTargetMode(ssid)?.let { return it }
+        val isLegacyTargetNetwork = watchdogLastSsid?.let { it.equals(ssid, ignoreCase = true) } ?: true
+        val mode = when {
+            !profileBssid.isNullOrBlank() -> WifiTargetMode.PIN_BSSID
+            !prefs.contains("last_target_band") -> WifiTargetMode.AUTO
+            !isLegacyTargetNetwork -> WifiTargetMode.AUTO
+            lastTargetBand.equals("Auto", ignoreCase = true) -> WifiTargetMode.AUTO
+            else -> WifiTargetMode.PREFER_5_GHZ
+        }
+        setWifiTargetMode(ssid, mode, profileBssid)
+        return mode
+    }
 
     var fallbackThresholdRssi: Int
         get() {

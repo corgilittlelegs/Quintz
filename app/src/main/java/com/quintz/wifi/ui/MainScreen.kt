@@ -435,6 +435,7 @@ fun MainScreen(viewModel: MainViewModel) {
                                                 CliRadioRow(
                                                     radio = radio,
                                                     isCurrent = isCurrent,
+                                                    isPinned = wifiStatus.isLockedToBssid && wifiStatus.lockedBssid?.equals(radio.bssid, ignoreCase = true) == true,
                                                     onLockClick = {
                                                         val source = "main_screen_wide_radio_lock"
                                                         val correlationId = DiagnosticLogger.newCorrelationId()
@@ -697,6 +698,7 @@ fun MainScreen(viewModel: MainViewModel) {
                                             CliRadioRow(
                                                 radio = radio,
                                                 isCurrent = isCurrent,
+                                                isPinned = wifiStatus.isLockedToBssid && wifiStatus.lockedBssid?.equals(radio.bssid, ignoreCase = true) == true,
                                                 onLockClick = {
                                                     val source = "main_screen_controls_radio_lock"
                                                     val correlationId = DiagnosticLogger.newCorrelationId()
@@ -1610,6 +1612,7 @@ fun CliQuickTilePanel(
 fun CliRadioRow(
     radio: AccessPointRadio,
     isCurrent: Boolean,
+    isPinned: Boolean,
     onLockClick: () -> Unit
 ) {
     val is5G = radio.band == BandType.BAND_5_GHZ || radio.band == BandType.BAND_6_GHZ
@@ -1687,9 +1690,13 @@ fun CliRadioRow(
                 CliSignalBars(radio.rssi, showDbmText = true)
 
                 CliButton(
-                    text = if (isCurrent) "LOCKED" else "BIND",
-                    variant = if (isCurrent) CliButtonVariant.Ghost else CliButtonVariant.Outlined,
-                    enabled = !isCurrent,
+                    text = when {
+                        isPinned -> "PINNED"
+                        isCurrent -> "CONNECTED"
+                        else -> "BIND"
+                    },
+                    variant = if (isPinned) CliButtonVariant.Ghost else CliButtonVariant.Outlined,
+                    enabled = !isPinned,
                     onClick = onLockClick
                 )
             }
