@@ -215,23 +215,88 @@ class WifiController(private val context: Context) {
     var lastScanCompletedTimestamp: Long = 0L
         private set
 
-    suspend fun scanRadios(correlationId: String? = null): List<AccessPointRadio> = withContext(Dispatchers.IO) {
+    suspend fun scanRadios(
+        correlationId: String? = null,
+        freshForSsid: String? = null
+    ): List<AccessPointRadio> = withContext(Dispatchers.IO) {
         if (!ShizukuManager.isReady()) return@withContext emptyList()
 
         _isScanning.value = true
         try {
-            ShizukuManager.exec("cmd wifi start-scan", correlationId = correlationId)
-            // 2500ms delay to allow hardware dwell and full multi-band scan completion
-            kotlinx.coroutines.delay(2500)
-            val scanResult = ShizukuManager.exec("cmd wifi list-scan-results", correlationId = correlationId)
-            
-            val currentSsid = _status.value.ssid
-            val currentBssid = _status.value.bssid
-            
-            val list = WifiParser.parseScanResults(scanResult.stdout, currentSsid, currentBssid)
-            _radios.value = list
+            val previousAgesByBssid = _radios.value.associate { it.bssid.lowercase() to it.ageSeconds }
+            val scanStartedAtMs = System.currentTimeMillis()
+            val scanStart = ShizukuManager.exec("cmd wifi start-scan", correlationId = correlationId)
+            if (!scanStart.isSuccess) {
+                DiagnosticLogger.log(
+                    "WIFI_SCAN",
+                    "id=${correlationId ?: "none"} result=failed phase=start_scan exitCode=${scanStart.exitCode} stderr=${scanStart.stderr.take(160)}"
+                )
+                return@withContext emptyList()
+            }
+
+            // start-scan can return success while Android still exposes its previous results.
+            // For watchdog recovery, poll until the target SSID has a fresh 5/6 GHz observation
+            // or the bounded wait expires; age advancing naturally does not count as a refresh.
+            val refreshDeadlineMs = scanStartedAtMs + if (freshForSsid != null) 12000L else 2500L
+            var list = emptyList<AccessPointRadio>()
+            var targetRefreshObserved = freshForSsid == null
+            var firstRead = true
+            while (true) {
+                val waitMs = if (firstRead) 2500L else 1000L
+                val remainingMs = refreshDeadlineMs - System.currentTimeMillis()
+                if (remainingMs > 0L) kotlinx.coroutines.delay(minOf(waitMs, remainingMs))
+                firstRead = false
+
+                val scanResult = ShizukuManager.exec("cmd wifi list-scan-results", correlationId = correlationId)
+                if (!scanResult.isSuccess) {
+                    DiagnosticLogger.log(
+                        "WIFI_SCAN",
+                        "id=${correlationId ?: "none"} result=failed phase=list_scan_results exitCode=${scanResult.exitCode} stderr=${scanResult.stderr.take(160)}"
+                    )
+                    return@withContext emptyList()
+                }
+
+                val currentSsid = _status.value.ssid
+                val currentBssid = _status.value.bssid
+                list = WifiParser.parseScanResults(scanResult.stdout, currentSsid, currentBssid)
+
+                if (freshForSsid != null) {
+                    val elapsedSeconds = ((System.currentTimeMillis() - scanStartedAtMs) / 1000L).coerceAtLeast(0L)
+                    targetRefreshObserved = list.any { radio ->
+                        val isTargetBand = radio.band == BandType.BAND_5_GHZ || radio.band == BandType.BAND_6_GHZ
+                        if (!radio.ssid.equals(freshForSsid, ignoreCase = true) || !isTargetBand || radio.ageSeconds > 8L) {
+                            false
+                        } else {
+                            val previousAge = previousAgesByBssid[radio.bssid.lowercase()]
+                            previousAge == null || radio.ageSeconds < previousAge + elapsedSeconds
+                        }
+                    }
+                }
+
+                val nowMs = System.currentTimeMillis()
+                if (targetRefreshObserved || nowMs >= refreshDeadlineMs) break
+            }
+
+            val usableList = if (freshForSsid != null && !targetRefreshObserved) {
+                DiagnosticLogger.log(
+                    "WIFI_SCAN",
+                    "id=${correlationId ?: "none"} result=target_not_refreshed targetSsid='$freshForSsid' action=exclude_target_5ghz_candidates"
+                )
+                list.filterNot {
+                    it.ssid.equals(freshForSsid, ignoreCase = true) &&
+                            (it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ)
+                }
+            } else {
+                list
+            }
+
+            _radios.value = usableList
             lastScanCompletedTimestamp = System.currentTimeMillis()
-            list
+            DiagnosticLogger.log(
+                "WIFI_SCAN",
+                "id=${correlationId ?: "none"} result=completed radios=${usableList.size} targetSsid='${freshForSsid.orEmpty()}' targetRefreshObserved=$targetRefreshObserved waitedMs=${lastScanCompletedTimestamp - scanStartedAtMs} completedAtMs=$lastScanCompletedTimestamp"
+            )
+            usableList
         } finally {
             _isScanning.value = false
         }
@@ -416,7 +481,18 @@ class WifiController(private val context: Context) {
             }
             val result = ShizukuManager.exec(cmd, correlationId = correlationId)
             if (!result.isSuccess) {
-                DiagnosticLogger.log("WIFI", "id=$correlationId Lock aborted: connect-network failed with exit code ${result.exitCode}: ${result.stderr}")
+                // If the active same-SSID profile was forgotten to force a BSSID transition,
+                // put a usable roaming profile back even when connect-network itself fails.
+                val profileRestored = if (alreadyOnSameSsid) {
+                    ensureProfileUnpinned(escapedSsid, escapedSec, passphrase, isOpen, macFlag, ssid, correlationId)
+                } else {
+                    null
+                }
+                refreshStatus()
+                DiagnosticLogger.log(
+                    "WIFI_ACTION",
+                    "id=$correlationId source=$requestSource result=failed reason=connect_network_failed exitCode=${result.exitCode} sameSsidHandoff=$alreadyOnSameSsid profileRestored=$profileRestored currentSsid='${_status.value.ssid}' currentBssid=${_status.value.bssid} band=${_status.value.band.displayName}"
+                )
                 return@withContext false
             }
 

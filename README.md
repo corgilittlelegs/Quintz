@@ -22,18 +22,21 @@ Quintz leverages the **[Shizuku](https://shizuku.rikka.app)** privileged API bri
 
 ## Key Features
 
-### 🔒 1-Tap 5 GHz BSSID Lock (No Root Required)
-- Pins the connection to the strongest 5 GHz / 6 GHz BSSID of your network.
-- Eliminates unwanted downgrades to 2.4 GHz.
+### 🔒 1-Tap 5 GHz Preference (No Root Required)
+- Selects a strong 5 GHz / 6 GHz BSSID on your network, then keeps the saved profile available for roaming.
+- The preferred-band action is not a permanent BSSID pin: Android and the Wi-Fi firmware can still roam to another BSSID or band when conditions require it.
+- Use a specific BSSID lock when you need to keep the profile pinned to one access point.
 - Supports WPA2-Personal, WPA3-SAE, Enhanced Open (OWE), and open networks.
 - Uses Shizuku to interface safely with Android's system Wi-Fi service.
 
 ### 🛡️ Smart Fallback Watchdog
-- Low-power foreground service continuously tracks live RSSI signal quality.
-- **Auto-Unlock**: If you walk into a dead zone where 5 GHz signal drops below `-82 dBm`, the watchdog automatically unlocks the connection to Auto-Roam mode so you never lose internet.
-- **Auto-Recovery**: Once you return to an area with strong 5 GHz reception (`≥ -70 dBm`), the watchdog seamlessly re-locks to 5 GHz.
-- **Silent Drift Detection**: Detects when OEM firmware (e.g. Samsung Intelligent Wi-Fi or Qualcomm firmware roaming) silently steers the connection to 2.4 GHz while signal is healthy, and re-pins the device back to 5 GHz.
-- Built with progressive scan backoff (12s → 30s) to minimize battery impact.
+- Runs as a foreground service and checks the connected band while the watchdog is enabled and Shizuku is available.
+- The 5 GHz preference leaves the saved profile unpinned so Android or device firmware can roam to 2.4 GHz when needed. The watchdog does not trigger an unlock at a particular 5 GHz RSSI value.
+- When the device is connected to the target SSID on 2.4 GHz, the watchdog scans for a same-SSID 5 GHz / 6 GHz BSSID. The default recovery threshold is `-72 dBm`.
+- A successful `start-scan` command only means Android accepted the request. Quintz waits up to 12 seconds for evidence that the target network's 5/6 GHz scan result refreshed, and excludes those candidates if it did not.
+- Recovery requires the same eligible BSSID in two fresh observations at least 10 seconds apart. If confirmed, Quintz requests a BSSID-specific transition, verifies that the target BSSID became active, then unpins the saved profile again so roaming remains allowed.
+- The recovery scan interval starts at about 12 seconds and backs off to 30 seconds when no eligible candidate is found or a recovery attempt fails. Failed switch attempts also receive a retry cooldown that increases from 60 seconds up to 5 minutes.
+- Recovery for secured networks requires Quintz to have the network password saved. A missing password, unavailable Shizuku service, stale scan results, or Android/OEM behavior can prevent or delay a switch; recovery is not guaranteed to be seamless.
 
 ### ⚙️ How BSSID Pinning Works & Technical Realities
 - **The Mechanism**: Quintz configures Android's saved network profile using `cmd wifi connect-network <SSID> <sec> [pass] -b <BSSID> -r <none|persistent>` via Shizuku. This tells Android's `WifiConfigManager` to restrict candidate selection to the designated hardware BSSID.
@@ -41,7 +44,7 @@ Quintz leverages the **[Shizuku](https://shizuku.rikka.app)** privileged API bri
 - **OEM & Firmware Realities**:
   - In Android, Qualcomm Wi-Fi driver firmware (`wlan_driver`) and OEM layers (e.g., Samsung's *Intelligent Wi-Fi* / `SemWifi`) retain autonomous driver-level roaming authority.
   - If RF signal degrades severely or the router issues IEEE 802.11k/v BSS transition management frames, the underlying Wi-Fi chip may autonomously reassociate to 2.4 GHz.
-  - **Why the Watchdog is Essential**: Because no user-space application can completely override kernel/firmware RF safety fallbacks, Quintz's Watchdog actively detects these silent drifts and re-pins the 5 GHz band as soon as RF conditions permit.
+  - **Why the Watchdog Helps**: Because no user-space application can completely override kernel/firmware roaming decisions, Quintz's Watchdog detects when the active connection is on 2.4 GHz and attempts a verified transition to a strong same-network 5 GHz / 6 GHz BSSID when RF conditions permit. It then restores the unpinned profile so normal roaming can continue.
 
 ### 📊 Real-Time Roaming & RF Telemetry Monitor
 - Real-time rolling oscilloscope canvas tracking active connection RSSI and PHY link speed over time.

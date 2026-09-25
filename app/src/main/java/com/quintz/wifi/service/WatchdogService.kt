@@ -48,10 +48,12 @@ class WatchdogService : Service() {
     private val isHandlingDisconnect = java.util.concurrent.atomic.AtomicBoolean(false)
     private var lastDisconnectHandledTimeMs: Long = 0L
 
-    private var candidate5GBssid: String? = null
-    private var consecutiveCandidateObservations: Int = 0
-    private var lastCandidateObservedAge: Long = -1L
-    private var lastCandidateScanTimestamp: Long = 0L
+    private data class CandidateObservation(
+        var observations: Int,
+        var lastConfirmedAtMs: Long
+    )
+
+    private val candidateObservations = mutableMapOf<String, CandidateObservation>()
     private var last5GSwitchAttemptTimeMs: Long = 0L
     private var switchCooldownMs: Long = 60000L
 
@@ -223,6 +225,7 @@ class WatchdogService : Service() {
                 var loopDelay = 12000L
                 if (prefs.isWatchdogEnabled) {
                     if (!ShizukuManager.isReady()) {
+                        DiagnosticLogger.log("WATCHDOG", "5 GHz recovery skipped reason=shizuku_not_ready")
                         updateNotification("Waiting for Shizuku permission...")
                         delay(10000L)
                         continue
@@ -239,10 +242,7 @@ class WatchdogService : Service() {
                                 // Healthy on 5 GHz: profile is unpinned, so hardware will roam gracefully to 2.4 GHz if signal dips
                                 fallbackScanInterval = 12000L
                                 prefs.isWatchdogFallbackActive = false
-                                consecutiveCandidateObservations = 0
-                                candidate5GBssid = null
-                                lastCandidateScanTimestamp = 0L
-                                lastCandidateObservedAge = -1L
+                                candidateObservations.clear()
                                 switchCooldownMs = 60000L
                                 val label = if (status.isLockedToBssid) "Locked to BSSID" else "Preferred 5 GHz (Roam Allowed)"
                                 updateNotification("$label • ${status.ssid} (${status.rssi} dBm)")
@@ -255,57 +255,90 @@ class WatchdogService : Service() {
                                 if (timeSinceLastAttempt < switchCooldownMs) {
                                     val remainingSec = ((switchCooldownMs - timeSinceLastAttempt) / 1000L).coerceAtLeast(1L)
                                     val modeDesc = if (prefs.isWatchdogFallbackActive) "Graceful 2.4 GHz fallback" else "Connected (2.4 GHz)"
+                                    DiagnosticLogger.log(
+                                        "WATCHDOG",
+                                        "5 GHz recovery deferred reason=cooldown remainingSec=$remainingSec cooldownMs=$switchCooldownMs ssid='${status.ssid}' currentBssid=${status.bssid} currentRssi=${status.rssi}"
+                                    )
                                     updateNotification("$modeDesc (${status.ssid}) • Cooldown ${remainingSec}s")
                                 } else {
                                     transitionMutex.withLock {
-                                        val radios = controller.scanRadios()
-                                        val strongFresh5G = radios.firstOrNull {
+                                        val radios = controller.scanRadios(freshForSsid = status.ssid)
+                                        val threshold = prefs.recoveryThresholdRssi
+                                        val sameNetworkRadios = radios.filter {
                                             it.ssid.equals(status.ssid, ignoreCase = true) &&
-                                                    (it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ) &&
-                                                    it.rssi >= prefs.recoveryThresholdRssi &&
-                                                    it.ageSeconds <= 8L
+                                                    (it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ)
                                         }
+                                        val eligibleRadios = sameNetworkRadios.filter {
+                                            it.rssi >= threshold && it.ageSeconds <= 8L
+                                        }
+                                        val eligibleBssids = eligibleRadios.map { it.bssid.lowercase() }.toSet()
+                                        val lostBssids = candidateObservations.keys.filter { it !in eligibleBssids }
+                                        lostBssids.forEach { candidateObservations.remove(it) }
 
-                                        if (strongFresh5G != null) {
-                                            val isSameCandidate = strongFresh5G.bssid.equals(candidate5GBssid, ignoreCase = true)
-                                            val timeSinceLastScan = now - lastCandidateScanTimestamp
-
-                                            if (isSameCandidate && timeSinceLastScan >= 10000L && strongFresh5G.ageSeconds <= 6L) {
-                                                // Distinct scan confirmed: at least 10s elapsed since prior scan, and fresh age proved new scan completed
-                                                consecutiveCandidateObservations++
-                                            } else if (!isSameCandidate) {
-                                                candidate5GBssid = strongFresh5G.bssid
-                                                consecutiveCandidateObservations = 1
+                                        sameNetworkRadios.forEach { radio ->
+                                            val rejectionReason = when {
+                                                radio.rssi < threshold -> "below_rssi_threshold"
+                                                radio.ageSeconds > 8L -> "scan_result_stale"
+                                                else -> null
                                             }
-                                            lastCandidateScanTimestamp = now
-                                            lastCandidateObservedAge = strongFresh5G.ageSeconds
-
-                                            DiagnosticLogger.log(
-                                                "WATCHDOG",
-                                                "5GHz candidate [${strongFresh5G.bssid}] observation $consecutiveCandidateObservations/2: RSSI=${strongFresh5G.rssi} dBm, age=${strongFresh5G.ageSeconds}s, timeSincePriorScan=${timeSinceLastScan}ms"
-                                            )
-
-                                            val isOpen = strongFresh5G.flags.uppercase().let {
-                                                !it.contains("PSK") && !it.contains("SAE") && !it.contains("WEP")
-                                            }
-
-                                            // Only attempt transition after candidate is verified fresh & strong across at least 2 distinct cycles
-                                            if (consecutiveCandidateObservations >= 2 && (!savedPassword.isNullOrEmpty() || isOpen)) {
+                                            if (rejectionReason != null) {
                                                 DiagnosticLogger.log(
                                                     "WATCHDOG",
-                                                    "5GHz candidate verified across repeated distinct scans. Returning to preferred band: ${strongFresh5G.bssid} (${strongFresh5G.rssi} dBm), current link ${status.band.displayName} at ${status.rssi} dBm."
+                                                    "5 GHz candidate rejected reason=$rejectionReason bssid=${radio.bssid} rssi=${radio.rssi}dBm threshold=${threshold}dBm age=${radio.ageSeconds}s ssid='${radio.ssid}'"
                                                 )
-                                                updateNotification("Returning to verified 5 GHz (${strongFresh5G.rssi} dBm)...")
+                                            }
+                                        }
+
+                                        val observationTimeMs = System.currentTimeMillis()
+                                        eligibleRadios.forEach { radio ->
+                                            val key = radio.bssid.lowercase()
+                                            val observation = candidateObservations[key]
+                                            val elapsedSincePriorMs = observation?.let {
+                                                observationTimeMs - it.lastConfirmedAtMs
+                                            }
+                                            if (observation == null) {
+                                                candidateObservations[key] = CandidateObservation(1, observationTimeMs)
+                                            } else if (radio.ageSeconds <= 6L && elapsedSincePriorMs != null && elapsedSincePriorMs >= 10000L) {
+                                                observation.observations++
+                                                observation.lastConfirmedAtMs = observationTimeMs
+                                            }
+                                            val currentObservation = candidateObservations.getValue(key)
+                                            DiagnosticLogger.log(
+                                                "WATCHDOG",
+                                                "5 GHz candidate bssid=${radio.bssid} observation=${currentObservation.observations}/2 rssi=${radio.rssi}dBm age=${radio.ageSeconds}s elapsedSincePrior=${elapsedSincePriorMs ?: -1L}ms"
+                                            )
+                                        }
+
+                                        val verified5G = eligibleRadios
+                                            .filter { (candidateObservations[it.bssid.lowercase()]?.observations ?: 0) >= 2 }
+                                            .maxByOrNull { it.rssi }
+
+                                        if (verified5G != null) {
+                                            val isOpen = verified5G.flags.uppercase().let {
+                                                !it.contains("PSK") && !it.contains("SAE") && !it.contains("WEP")
+                                            }
+                                            if (savedPassword.isNullOrEmpty() && !isOpen) {
+                                                DiagnosticLogger.log(
+                                                    "WATCHDOG",
+                                                    "5 GHz recovery deferred reason=saved_password_missing ssid='${status.ssid}' bssid=${verified5G.bssid} rssi=${verified5G.rssi}dBm"
+                                                )
+                                                updateNotification("5 GHz is strong • Save network password to recover")
+                                            } else {
+                                                DiagnosticLogger.log(
+                                                    "WATCHDOG",
+                                                    "5 GHz candidate verified across repeated distinct scans. Returning to preferred band: ${verified5G.bssid} (${verified5G.rssi} dBm), current link ${status.band.displayName} at ${status.rssi} dBm."
+                                                )
+                                                updateNotification("Returning to verified 5 GHz (${verified5G.rssi} dBm)...")
                                                 last5GSwitchAttemptTimeMs = System.currentTimeMillis()
                                                 val correlationId = DiagnosticLogger.newCorrelationId()
                                                 DiagnosticLogger.log(
                                                     "WIFI_ACTION",
-                                                    "id=$correlationId source=watchdog_5ghz_recovery action=lock_to_bssid ssid='${status.ssid}' targetBssid=${strongFresh5G.bssid} candidateRssi=${strongFresh5G.rssi} currentBssid=${status.bssid} currentBand=${status.band.displayName} currentRssi=${status.rssi}"
+                                                    "id=$correlationId source=watchdog_5ghz_recovery action=lock_to_bssid ssid='${status.ssid}' targetBssid=${verified5G.bssid} candidateRssi=${verified5G.rssi} currentBssid=${status.bssid} currentBand=${status.band.displayName} currentRssi=${status.rssi}"
                                                 )
 
                                                 val switched = controller.lockToBssid(
                                                     status.ssid,
-                                                    strongFresh5G.bssid,
+                                                    verified5G.bssid,
                                                     savedPassword.orEmpty(),
                                                     unpinProfileForRoaming = true,
                                                     deferIfHealthy24Ghz = true,
@@ -316,10 +349,7 @@ class WatchdogService : Service() {
                                                 if (switched) {
                                                     prefs.isWatchdogFallbackActive = false
                                                     fallbackScanInterval = 12000L
-                                                    consecutiveCandidateObservations = 0
-                                                    candidate5GBssid = null
-                                                    lastCandidateScanTimestamp = 0L
-                                                    lastCandidateObservedAge = -1L
+                                                    candidateObservations.clear()
                                                     switchCooldownMs = 60000L
                                                     val postStatus = controller.status.value
                                                     val label = if (postStatus.isLockedToBssid) "Locked to BSSID" else "Preferred 5 GHz (Roam Allowed)"
@@ -327,10 +357,7 @@ class WatchdogService : Service() {
                                                 } else {
                                                     // A failed attempt still backs off to avoid repeated association churn.
                                                     switchCooldownMs = (switchCooldownMs + 30000L).coerceAtMost(300000L)
-                                                    consecutiveCandidateObservations = 0
-                                                    candidate5GBssid = null
-                                                    lastCandidateScanTimestamp = 0L
-                                                    lastCandidateObservedAge = -1L
+                                                    candidateObservations.clear()
                                                     fallbackScanInterval = (fallbackScanInterval + 4000L).coerceAtMost(30000L)
                                                     DiagnosticLogger.log(
                                                         "WATCHDOG",
@@ -338,31 +365,51 @@ class WatchdogService : Service() {
                                                     )
                                                     updateNotification("5 GHz recovery failed • Retrying later")
                                                 }
-                                            } else {
-                                                updateNotification("Observing 5 GHz (${strongFresh5G.rssi} dBm, $consecutiveCandidateObservations/2) • ${status.ssid}")
                                             }
                                         } else {
-                                            if (consecutiveCandidateObservations > 0) {
-                                                DiagnosticLogger.log("WATCHDOG", "5GHz candidate lost or dropped below threshold; resetting observation counter.")
+                                            if (eligibleRadios.isEmpty()) {
+                                                candidateObservations.clear()
+                                                val reason = when {
+                                                    radios.isEmpty() -> "scan_empty_or_failed"
+                                                    sameNetworkRadios.isEmpty() -> "no_same_ssid_5ghz_candidate"
+                                                    else -> "no_candidate_passed_rssi_and_freshness"
+                                                }
+                                                DiagnosticLogger.log(
+                                                    "WATCHDOG",
+                                                    "5 GHz recovery skipped reason=$reason ssid='${status.ssid}' threshold=${threshold}dBm sameNetworkCandidates=${sameNetworkRadios.size} scannedRadios=${radios.size} currentBand=${status.band.displayName} currentRssi=${status.rssi}"
+                                                )
+                                                val modeDesc = if (prefs.isWatchdogFallbackActive) "Graceful 2.4 GHz fallback" else "Monitoring for 5 GHz"
+                                                updateNotification("$modeDesc (${status.band.displayName}) • ${status.ssid}")
+                                                fallbackScanInterval = (fallbackScanInterval + 4000L).coerceAtMost(30000L)
+                                            } else {
+                                                val bestObserved = eligibleRadios.maxByOrNull { it.rssi }!!
+                                                val observationCount = candidateObservations[bestObserved.bssid.lowercase()]?.observations ?: 1
+                                                if (savedPassword.isNullOrEmpty() && bestObserved.flags.uppercase().let {
+                                                        it.contains("PSK") || it.contains("SAE") || it.contains("WEP")
+                                                    }
+                                                ) {
+                                                    DiagnosticLogger.log(
+                                                        "WATCHDOG",
+                                                        "5 GHz recovery deferred reason=saved_password_missing ssid='${status.ssid}' bssid=${bestObserved.bssid} rssi=${bestObserved.rssi}dBm observation=$observationCount/2"
+                                                    )
+                                                }
+                                                DiagnosticLogger.log(
+                                                    "WATCHDOG",
+                                                    "5 GHz recovery waiting reason=second_observation ssid='${status.ssid}' bestBssid=${bestObserved.bssid} rssi=${bestObserved.rssi}dBm age=${bestObserved.ageSeconds}s observation=$observationCount/2 threshold=${threshold}dBm"
+                                                )
+                                                updateNotification("Observing 5 GHz (${bestObserved.rssi} dBm, $observationCount/2) • ${status.ssid}")
                                             }
-                                            consecutiveCandidateObservations = 0
-                                            candidate5GBssid = null
-                                            lastCandidateScanTimestamp = 0L
-                                            lastCandidateObservedAge = -1L
-
-                                            val modeDesc = if (prefs.isWatchdogFallbackActive) "Graceful 2.4 GHz fallback" else "Monitoring for 5 GHz"
-                                            updateNotification("$modeDesc (${status.band.displayName}) • ${status.ssid}")
-                                            fallbackScanInterval = (fallbackScanInterval + 4000L).coerceAtMost(30000L)
                                         }
                                     }
                                 }
                             } else {
                                 fallbackScanInterval = 12000L
                                 prefs.isWatchdogFallbackActive = false
-                                consecutiveCandidateObservations = 0
-                                candidate5GBssid = null
-                                lastCandidateScanTimestamp = 0L
-                                lastCandidateObservedAge = -1L
+                                candidateObservations.clear()
+                                DiagnosticLogger.log(
+                                    "WATCHDOG",
+                                    "5 GHz recovery skipped reason=target_band_auto ssid='${status.ssid}' currentBand=${status.band.displayName} currentRssi=${status.rssi}"
+                                )
                                 updateNotification("Auto-Roam • ${status.ssid}")
                             }
                         } else {
