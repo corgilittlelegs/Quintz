@@ -152,4 +152,18 @@ class WifiParserTest {
         assertEquals(9, WifiParser.parseNetworkId("9\tTab network\twpa2-psk", "Tab network", 9, "2"))
         assertNull(WifiParser.parseNetworkId("9\tTab network\twpa2-psk", "Tab network", 9, "4"))
     }
+
+    @Test fun savedNetworkIdentityRejectsCaseAndPrefixCollisions() {
+        val networks = """
+            Network Id      SSID                         Security type
+            10              Home                         wpa2-psk
+            11              Home 5G                      wpa2-psk
+            12              home                         wpa2-psk
+            13              Home                         wpa3-sae
+        """.trimIndent()
+        assertEquals(10, WifiParser.parseNetworkId(networks, "Home", 10, "2"))
+        assertNull(WifiParser.parseNetworkId(networks, "Home", 11, "2"))
+        assertNull(WifiParser.parseNetworkId(networks, "Home", 12, "2"))
+        assertNull(WifiParser.parseNetworkId(networks, "Home", 13, "2"))
+    }
 }

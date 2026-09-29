@@ -924,6 +924,7 @@ class WifiController(private val context: Context) {
         ssid: String,
         passphrase: String,
         macAddressPolicy: com.quintz.wifi.model.MacAddressPolicy? = null,
+        approvedBssid: String? = null,
         requestSource: String = "unspecified",
         correlationId: String = DiagnosticLogger.newCorrelationId()
     ): Boolean {
@@ -961,10 +962,16 @@ class WifiController(private val context: Context) {
                 it.ssid == ssid &&
                         (it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ) &&
                         it.rssi >= -80 && it.ageSeconds <= 8L &&
-                        WifiSecurityPolicy.allowsTrustedAutomaticSwitch(
-                            current.securityType, currentFlags, it.flags,
-                            prefs.getTrustedRadioSecurity(ssid, it.bssid)
-                        )
+                        (if (approvedBssid != null) {
+                            WifiSecurityPolicy.allowsApprovedManualSwitch(
+                                current.securityType, currentFlags, it.flags, approvedBssid, it.bssid
+                            )
+                        } else {
+                            WifiSecurityPolicy.allowsTrustedAutomaticSwitch(
+                                current.securityType, currentFlags, it.flags,
+                                prefs.getTrustedRadioSecurity(ssid, it.bssid)
+                            )
+                        })
             }
             .maxByOrNull { it.rssi }
 

@@ -70,6 +70,9 @@ jobs:
           echo "version_code=${VERSION_CODE}" >> $GITHUB_OUTPUT
           echo "Resolved version_name: ${VERSION_NAME}, version_code: ${VERSION_CODE}, tag_name: ${TAG_NAME}"
 
+      - name: Unit tests and full lint
+        run: ./gradlew test lintDebug lintRelease --no-daemon --console=plain
+
       - name: Build Release APK
         run: |
           ./gradlew assembleRelease --no-daemon \

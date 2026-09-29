@@ -9,6 +9,18 @@ internal data class AdvertisedSecurity(
 )
 
 internal object WifiSecurityPolicy {
+    fun securityLabel(flags: String): String {
+        val advertised = fromFlags(flags)
+        return when {
+            advertised.supportsPsk && advertised.supportsSae -> "WPA2/WPA3 Personal"
+            advertised.supportsSae -> "WPA3 Personal"
+            advertised.supportsPsk -> "WPA2 Personal"
+            advertised.isOwe -> "OWE"
+            advertised.isOpen -> "Open"
+            else -> "Unknown / unsupported"
+        }
+    }
+
     fun fromFlags(flags: String): AdvertisedSecurity {
         val upper = flags.uppercase()
         return AdvertisedSecurity(
@@ -70,6 +82,18 @@ internal object WifiSecurityPolicy {
             allowsAutomaticSwitch(currentSecurityType, currentFlags, candidateFlags) &&
             matchesSecurityType(current, candidateFlags)
     }
+
+    /** A deliberate, exact-radio selection may establish trust after the connection is verified. */
+    fun allowsApprovedManualSwitch(
+        currentSecurityType: String,
+        currentFlags: String,
+        candidateFlags: String,
+        approvedBssid: String,
+        candidateBssid: String
+    ): Boolean = candidateBssid.equals(approvedBssid, ignoreCase = true) &&
+        currentSecurityType in setOf("2", "4") &&
+        allowsAutomaticSwitch(currentSecurityType, currentFlags, candidateFlags) &&
+        matchesSecurityType(currentSecurityType, candidateFlags)
 
     /** A same-name profile cannot silently move to open or a different personal security mode. */
     fun allowsSameSsidSelection(currentSecurityType: String, targetSecurityType: String?): Boolean {

@@ -1,5 +1,6 @@
 package com.quintz.wifi.service
 
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.Intent
 import android.graphics.drawable.Icon
@@ -178,6 +179,7 @@ class TileService : android.service.quicksettings.TileService() {
         }
     }
 
+    @SuppressLint("StartActivityAndCollapseDeprecated")
     private fun openMainActivityFromTile() {
         val appIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -188,6 +190,7 @@ class TileService : android.service.quicksettings.TileService() {
             )
             startActivityAndCollapse(pendingIntent)
         } else {
+            // The PendingIntent overload is unavailable before API 34.
             @Suppress("DEPRECATION")
             startActivityAndCollapse(appIntent)
         }

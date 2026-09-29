@@ -81,6 +81,9 @@ class Preferences(context: Context) {
                 context.deleteSharedPreferences("prefs")
             }
         }
+        // This legacy setting was never used by the steering control path.
+        prefs.edit().remove("fallback_threshold").apply()
+        fallbackPrefs.edit().remove("fallback_threshold").apply()
     }
 
     val isPasswordStorageAvailable: Boolean get() = securePrefs != null && legacyPasswordCleanupSucceeded
@@ -179,13 +182,6 @@ class Preferences(context: Context) {
         setWifiTargetMode(ssid, mode, profileBssid)
         return mode
     }
-
-    var fallbackThresholdRssi: Int
-        get() {
-            val v = prefs.getInt("fallback_threshold", -75)
-            return if (v < -75) -75 else v
-        }
-        set(value) = prefs.edit().putInt("fallback_threshold", value).apply()
 
     var recoveryThresholdRssi: Int
         get() {

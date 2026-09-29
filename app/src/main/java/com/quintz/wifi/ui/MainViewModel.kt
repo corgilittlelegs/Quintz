@@ -151,8 +151,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         checkTileStatus()
 
         viewModelScope.launch {
+            var initialConnectedStatusHandled = false
             wifiStatus.collect { status ->
                 recordTelemetrySample()
+                if (status.isConnected && !initialConnectedStatusHandled) {
+                    initialConnectedStatusHandled = true
+                    if ((status.isPreferred5GHz || status.isPreferred5GHzFallback) && !prefs.isWatchdogEnabled) {
+                        toggleWatchdog(true)
+                    }
+                }
             }
         }
 
@@ -502,9 +509,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    suspend fun findManualPreferCandidate(): AccessPointRadio? {
+        val status = controller.refreshStatus(forceFresh = true)
+        if (!status.isConnected || status.ssid.isEmpty()) return null
+        val scanned = controller.scanRadios(freshForSsid = status.ssid)
+        val currentFlags = scanned.firstOrNull {
+            it.ssid == status.ssid && it.bssid.equals(status.bssid, ignoreCase = true)
+        }?.flags.orEmpty()
+        return scanned.filter {
+            it.ssid == status.ssid &&
+                (it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ) &&
+                it.rssi >= -80 && it.ageSeconds <= 8L &&
+                WifiSecurityPolicy.allowsAutomaticSwitch(status.securityType, currentFlags, it.flags) &&
+                WifiSecurityPolicy.matchesSecurityType(status.securityType, it.flags)
+        }.maxByOrNull { it.rssi }
+    }
+
     fun forceLock5Ghz(
         password: String,
         macPolicy: com.quintz.wifi.model.MacAddressPolicy? = null,
+        approvedBssid: String? = null,
         requestSource: String = "main_screen_primary_button",
         correlationId: String = DiagnosticLogger.newCorrelationId()
     ) {
@@ -531,17 +555,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 status.ssid,
                 password,
                 policy,
+                approvedBssid = approvedBssid,
                 requestSource = requestSource,
                 correlationId = correlationId
             )
             DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId source=$requestSource result=${if (success) "success" else "failure"} action=prefer_5ghz")
             refreshAll()
             if (success) {
+                if (approvedBssid != null) {
+                    val verified = controller.status.value
+                    if (verified.isConnected && verified.ssid == status.ssid &&
+                        verified.bssid.equals(approvedBssid, ignoreCase = true)) {
+                        prefs.trustSelectedRadio(status.ssid, approvedBssid, verified.securityType)
+                    }
+                }
+                val watchdogStarted = toggleWatchdog(true)
                 _message.value = "Preferred 5 GHz active with roaming allowed (${policy.displayName})" +
-                    if (prefs.isWatchdogEnabled) "" else "; turn on Watchdog for automatic recovery"
+                    if (watchdogStarted) "; Watchdog active" else "; Watchdog could not start"
             } else {
-                _message.value = if (controller.lastPasswordStorageFailure) securePasswordError
-                    else "Choose and connect to a 5 GHz radio in the app once to trust it, then retry. The radio must also be fresh and compatible."
+                _message.value = when {
+                    controller.lastPasswordStorageFailure -> securePasswordError
+                    approvedBssid != null -> "Could not verify the selected 5 GHz radio. Rescan and retry."
+                    else -> "Choose and connect to a 5 GHz radio in the app once to trust it, then retry. The radio must also be fresh and compatible."
+                }
             }
         }
     }
@@ -617,21 +653,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun toggleWatchdog(enabled: Boolean) {
-        prefs.isWatchdogEnabled = enabled
-        _watchdogActive.value = enabled
+    fun toggleWatchdog(enabled: Boolean): Boolean {
         val context = getApplication<Application>()
         val intent = Intent(context, WatchdogService::class.java)
         if (enabled) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            prefs.isWatchdogEnabled = true
+            return try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+                _watchdogActive.value = true
+                DiagnosticLogger.log("WATCHDOG", "result=started source=preferred_5ghz")
+                _message.value = "Watchdog on; each network follows its saved mode"
+                true
+            } catch (e: Exception) {
+                prefs.isWatchdogEnabled = false
+                _watchdogActive.value = false
+                DiagnosticLogger.log("WATCHDOG", "result=failed reason=${e.javaClass.simpleName}")
+                _message.value = "Watchdog could not start"
+                false
             }
-            _message.value = "Watchdog on; each network follows its saved mode"
         } else {
+            prefs.isWatchdogEnabled = false
+            _watchdogActive.value = false
             context.stopService(intent)
             _message.value = "Watchdog disabled"
+            return true
         }
     }
 

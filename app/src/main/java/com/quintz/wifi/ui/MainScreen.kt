@@ -48,6 +48,7 @@ import com.quintz.wifi.shizuku.ShizukuManager
 import com.quintz.wifi.ui.components.*
 import com.quintz.wifi.ui.graph.WifiGraphView
 import com.quintz.wifi.ui.theme.*
+import kotlinx.coroutines.launch
 
 enum class RadioFilter {
     ALL,
@@ -87,7 +88,37 @@ fun MainScreen(viewModel: MainViewModel) {
     var passwordInput by remember { mutableStateOf("") }
     var isPasswordVisible by remember { mutableStateOf(false) }
     var targetRadioForPassword by remember { mutableStateOf<AccessPointRadio?>(null) }
+    var pendingBindRadio by remember { mutableStateOf<AccessPointRadio?>(null) }
+    var pendingBindSource by remember { mutableStateOf("") }
+    var pendingPreferRadio by remember { mutableStateOf<AccessPointRadio?>(null) }
+    var pendingPreferSource by remember { mutableStateOf("") }
+    var preferRadioForPassword by remember { mutableStateOf<AccessPointRadio?>(null) }
+    var isPreparingPrefer by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+
+    fun requestRadioBind(radio: AccessPointRadio, source: String) {
+        pendingBindRadio = radio
+        pendingBindSource = source
+    }
+
+    fun requestPrefer5Ghz(source: String) {
+        if (isPreparingPrefer) return
+        isPreparingPrefer = true
+        scope.launch {
+            try {
+                val radio = viewModel.findManualPreferCandidate()
+                if (radio == null) {
+                    snackbarHostState.showSnackbar("No fresh compatible 5 GHz radio found for the active network.")
+                } else {
+                    pendingPreferRadio = radio
+                    pendingPreferSource = source
+                }
+            } finally {
+                isPreparingPrefer = false
+            }
+        }
+    }
 
     fun executeWithMacPolicyCheck(ssid: String, action: () -> Unit) {
         if (ssid.isEmpty() || viewModel.getMacPolicy(ssid) != null) {
@@ -96,6 +127,58 @@ fun MainScreen(viewModel: MainViewModel) {
             targetSsidForMacPolicy = ssid
             pendingLockAction = action
             showMacPolicyDialog = true
+        }
+    }
+
+    fun confirmRadioBind() {
+        val requested = pendingBindRadio ?: return
+        val source = pendingBindSource
+        pendingBindRadio = null
+        val radio = radios.firstOrNull { it.bssid.equals(requested.bssid, ignoreCase = true) &&
+            it.ssid == requested.ssid && it.flags == requested.flags }
+        if (radio == null) {
+            scope.launch { snackbarHostState.showSnackbar("AP data changed. Rescan before binding.") }
+            return
+        }
+        val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
+        val advertised = WifiSecurityPolicy.fromFlags(radio.flags)
+        val correlationId = DiagnosticLogger.newCorrelationId()
+        DiagnosticLogger.log("USER_ACTION", "id=$correlationId source=$source action=bind targetSsid='$targetSsid' targetBssid=${radio.bssid} security=${WifiSecurityPolicy.securityLabel(radio.flags)}")
+        if (advertised.isOpen || advertised.isOwe) {
+            executeWithMacPolicyCheck(targetSsid) {
+                viewModel.lockToSpecificRadio(radio, "", requestSource = source, correlationId = correlationId)
+            }
+        } else {
+            val saved = viewModel.getSavedPassword(targetSsid)
+            if (saved.isNotEmpty()) {
+                executeWithMacPolicyCheck(targetSsid) {
+                    viewModel.lockToSpecificRadio(radio, saved, requestSource = source, correlationId = correlationId)
+                }
+            } else {
+                targetRadioForPassword = radio
+                passwordInput = ""
+                showPasswordDialog = true
+            }
+        }
+    }
+
+    fun confirmPrefer5Ghz() {
+        val radio = pendingPreferRadio ?: return
+        val source = pendingPreferSource
+        pendingPreferRadio = null
+        val ssid = radio.ssid
+        val saved = viewModel.getSavedPassword(ssid)
+        if (saved.isNotEmpty()) {
+            val correlationId = DiagnosticLogger.newCorrelationId()
+            executeWithMacPolicyCheck(ssid) {
+                viewModel.forceLock5Ghz(saved, approvedBssid = radio.bssid,
+                    requestSource = source, correlationId = correlationId)
+            }
+        } else {
+            preferRadioForPassword = radio
+            targetRadioForPassword = null
+            passwordInput = ""
+            showPasswordDialog = true
         }
     }
 
@@ -289,6 +372,7 @@ fun MainScreen(viewModel: MainViewModel) {
                         CliConnectedHeroPanel(
                             status = wifiStatus,
                             isOperating = isOperating,
+                            recoveryThresholdRssi = viewModel.prefs.recoveryThresholdRssi,
                             onGetMacPolicy = { viewModel.getMacPolicy(it) },
                             onToggleMacPolicy = { ssid ->
                                 val current = viewModel.getMacPolicy(ssid) ?: MacAddressPolicy.DEVICE
@@ -301,17 +385,7 @@ fun MainScreen(viewModel: MainViewModel) {
                                 if (wifiStatus.isSteeredOrLocked) {
                                     viewModel.unlockToAuto(source, correlationId)
                                 } else {
-                                    val saved = viewModel.getSavedPassword(wifiStatus.ssid)
-                                    val isCurrentOpen = wifiStatus.securityType == "0" || wifiStatus.securityType == "open"
-                                    if (saved.isNotEmpty() || isCurrentOpen) {
-                                        executeWithMacPolicyCheck(wifiStatus.ssid) {
-                                            viewModel.forceLock5Ghz(saved, requestSource = source, correlationId = correlationId)
-                                        }
-                                    } else {
-                                        passwordInput = ""
-                                        targetRadioForPassword = null
-                                        showPasswordDialog = true
-                                    }
+                                    requestPrefer5Ghz(source)
                                 }
                             },
                             onOpenGraph = { selectedRightPane = RightPaneView.GRAPH },
@@ -457,31 +531,7 @@ fun MainScreen(viewModel: MainViewModel) {
                                                     isCurrent = isCurrent,
                                                     isPinned = wifiStatus.isLockedToBssid && wifiStatus.lockedBssid?.equals(radio.bssid, ignoreCase = true) == true,
                                                     onLockClick = {
-                                                        val source = "main_screen_wide_radio_lock"
-                                                        val correlationId = DiagnosticLogger.newCorrelationId()
-                                                        DiagnosticLogger.log(
-                                                            "USER_ACTION",
-                                                            "id=$correlationId source=$source callback=radio_lock_button targetSsid='${radio.ssid}' targetBssid=${radio.bssid} band=${radio.band.displayName} rssi=${radio.rssi} currentSsid='${wifiStatus.ssid}' currentBssid=${wifiStatus.bssid} currentBand=${wifiStatus.band.displayName} currentRssi=${wifiStatus.rssi}"
-                                                        )
-                                                        val advertised = WifiSecurityPolicy.fromFlags(radio.flags)
-                                                        val isOpen = advertised.isOpen || advertised.isOwe
-                                                        val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
-                                                        if (isOpen) {
-                                                            executeWithMacPolicyCheck(targetSsid) {
-                                                                viewModel.lockToSpecificRadio(radio, "", requestSource = source, correlationId = correlationId)
-                                                            }
-                                                        } else {
-                                                            val saved = viewModel.getSavedPassword(targetSsid)
-                                                            if (saved.isNotEmpty()) {
-                                                                executeWithMacPolicyCheck(targetSsid) {
-                                                                    viewModel.lockToSpecificRadio(radio, saved, requestSource = source, correlationId = correlationId)
-                                                                }
-                                                            } else {
-                                                                targetRadioForPassword = radio
-                                                                passwordInput = ""
-                                                                showPasswordDialog = true
-                                                            }
-                                                        }
+                                                        requestRadioBind(radio, "main_screen_wide_radio_lock")
                                                     }
                                                 )
                                             }
@@ -502,12 +552,7 @@ fun MainScreen(viewModel: MainViewModel) {
                                         onLockBssid = { bssid ->
                                             val radio = radios.find { it.bssid.equals(bssid, ignoreCase = true) }
                                             if (radio != null) {
-                                                val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
-                                                val saved = viewModel.getSavedPassword(targetSsid)
-                                                val correlationId = DiagnosticLogger.newCorrelationId()
-                                                executeWithMacPolicyCheck(targetSsid) {
-                                                    viewModel.lockToSpecificRadio(radio, saved, requestSource = "graph", correlationId = correlationId)
-                                                }
+                                                requestRadioBind(radio, "graph")
                                             }
                                         },
                                         isConnected = wifiStatus.isConnected
@@ -598,6 +643,7 @@ fun MainScreen(viewModel: MainViewModel) {
                                     CliConnectedHeroPanel(
                                         status = wifiStatus,
                                         isOperating = isOperating,
+                                        recoveryThresholdRssi = viewModel.prefs.recoveryThresholdRssi,
                                         onGetMacPolicy = { viewModel.getMacPolicy(it) },
                                         onToggleMacPolicy = { ssid ->
                                             val current = viewModel.getMacPolicy(ssid) ?: MacAddressPolicy.DEVICE
@@ -610,17 +656,7 @@ fun MainScreen(viewModel: MainViewModel) {
                                             if (wifiStatus.isSteeredOrLocked) {
                                                 viewModel.unlockToAuto(source, correlationId)
                                             } else {
-                                                val saved = viewModel.getSavedPassword(wifiStatus.ssid)
-                                                val isCurrentOpen = wifiStatus.securityType == "0" || wifiStatus.securityType == "open"
-                                                if (saved.isNotEmpty() || isCurrentOpen) {
-                                                    executeWithMacPolicyCheck(wifiStatus.ssid) {
-                                                        viewModel.forceLock5Ghz(saved, requestSource = source, correlationId = correlationId)
-                                                    }
-                                                } else {
-                                                    passwordInput = ""
-                                                    targetRadioForPassword = null
-                                                    showPasswordDialog = true
-                                                }
+                                                requestPrefer5Ghz(source)
                                             }
                                         },
                                         onOpenGraph = { selectedPhoneTab = PhoneTab.GRAPH },
@@ -714,37 +750,13 @@ fun MainScreen(viewModel: MainViewModel) {
                                             verticalArrangement = Arrangement.spacedBy(10.dp)
                                         ) {
                                             items(filteredRadios) { radio ->
-                                            val isCurrent = wifiStatus.isConnected && radio.bssid.equals(wifiStatus.bssid, ignoreCase = true)
-                                            CliRadioRow(
-                                                radio = radio,
-                                                isCurrent = isCurrent,
-                                                isPinned = wifiStatus.isLockedToBssid && wifiStatus.lockedBssid?.equals(radio.bssid, ignoreCase = true) == true,
-                                                onLockClick = {
-                                                    val source = "main_screen_controls_radio_lock"
-                                                    val correlationId = DiagnosticLogger.newCorrelationId()
-                                                    DiagnosticLogger.log(
-                                                        "USER_ACTION",
-                                                        "id=$correlationId source=$source callback=radio_lock_button targetSsid='${radio.ssid}' targetBssid=${radio.bssid} band=${radio.band.displayName} rssi=${radio.rssi} currentSsid='${wifiStatus.ssid}' currentBssid=${wifiStatus.bssid} currentBand=${wifiStatus.band.displayName} currentRssi=${wifiStatus.rssi}"
-                                                    )
-                                                    val advertised = WifiSecurityPolicy.fromFlags(radio.flags)
-                                                    val isOpen = advertised.isOpen || advertised.isOwe
-                                                        val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
-                                                        if (isOpen) {
-                                                        executeWithMacPolicyCheck(targetSsid) {
-                                                            viewModel.lockToSpecificRadio(radio, "", requestSource = source, correlationId = correlationId)
-                                                            }
-                                                        } else {
-                                                            val saved = viewModel.getSavedPassword(targetSsid)
-                                                            if (saved.isNotEmpty()) {
-                                                                executeWithMacPolicyCheck(targetSsid) {
-                                                                    viewModel.lockToSpecificRadio(radio, saved, requestSource = source, correlationId = correlationId)
-                                                                }
-                                                            } else {
-                                                                targetRadioForPassword = radio
-                                                                passwordInput = ""
-                                                                showPasswordDialog = true
-                                                            }
-                                                        }
+                                                val isCurrent = wifiStatus.isConnected && radio.bssid.equals(wifiStatus.bssid, ignoreCase = true)
+                                                CliRadioRow(
+                                                    radio = radio,
+                                                    isCurrent = isCurrent,
+                                                    isPinned = wifiStatus.isLockedToBssid && wifiStatus.lockedBssid?.equals(radio.bssid, ignoreCase = true) == true,
+                                                    onLockClick = {
+                                                        requestRadioBind(radio, "main_screen_controls_radio_lock")
                                                     }
                                                 )
                                             }
@@ -766,12 +778,7 @@ fun MainScreen(viewModel: MainViewModel) {
                                     onLockBssid = { bssid ->
                                         val radio = radios.find { it.bssid.equals(bssid, ignoreCase = true) }
                                         if (radio != null) {
-                                            val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
-                                            val saved = viewModel.getSavedPassword(targetSsid)
-                                            val correlationId = DiagnosticLogger.newCorrelationId()
-                                            executeWithMacPolicyCheck(targetSsid) {
-                                                viewModel.lockToSpecificRadio(radio, saved, requestSource = "graph", correlationId = correlationId)
-                                            }
+                                            requestRadioBind(radio, "graph")
                                         }
                                     },
                                     isConnected = wifiStatus.isConnected
@@ -784,11 +791,65 @@ fun MainScreen(viewModel: MainViewModel) {
         }
     }
 
+    pendingPreferRadio?.let { radio ->
+        Dialog(onDismissRequest = { pendingPreferRadio = null }) {
+            CliPanel(
+                borderColor = CliBorderActive,
+                containerColor = CliSurface,
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(20.dp)
+            ) {
+                Text("CONFIRM 5 GHz RADIO", style = CliTypography.TelemetryLabel, color = CliAccent5GHz)
+                Spacer(modifier = Modifier.height(12.dp))
+                Text("SSID: ${radio.ssid}", style = CliTypography.CodeMono, color = CliTextPrimary)
+                Text("BSSID: ${radio.bssid}", style = CliTypography.CodeMono, color = CliTextPrimary)
+                Text("Security: ${WifiSecurityPolicy.securityLabel(radio.flags)}", style = CliTypography.CodeMono, color = CliTextPrimary)
+                Spacer(modifier = Modifier.height(10.dp))
+                Text("Updates the saved profile and may interrupt the connection. Roaming remains enabled.",
+                    style = Typography.bodyMedium, color = CliTextSecondary)
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    CliButton(text = "CANCEL", variant = CliButtonVariant.Ghost,
+                        onClick = { pendingPreferRadio = null }, modifier = Modifier.weight(1f))
+                    CliButton(text = "PREFER 5 GHZ", variant = CliButtonVariant.Primary,
+                        onClick = { confirmPrefer5Ghz() }, modifier = Modifier.weight(1.5f))
+                }
+            }
+        }
+    }
+
+    pendingBindRadio?.let { radio ->
+        Dialog(onDismissRequest = { pendingBindRadio = null }) {
+            CliPanel(
+                borderColor = CliBorderActive,
+                containerColor = CliSurface,
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(20.dp)
+            ) {
+                Text("CONFIRM BSSID BIND", style = CliTypography.TelemetryLabel, color = CliAccent5GHz)
+                Spacer(modifier = Modifier.height(12.dp))
+                Text("SSID: ${radio.ssid.ifEmpty { wifiStatus.ssid }}", style = CliTypography.CodeMono, color = CliTextPrimary)
+                Text("BSSID: ${radio.bssid}", style = CliTypography.CodeMono, color = CliTextPrimary)
+                Text("Security: ${WifiSecurityPolicy.securityLabel(radio.flags)}", style = CliTypography.CodeMono, color = CliTextPrimary)
+                Spacer(modifier = Modifier.height(10.dp))
+                Text("Updates the saved network profile and may interrupt the current connection.", style = Typography.bodyMedium, color = CliTextSecondary)
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    CliButton(text = "CANCEL", variant = CliButtonVariant.Ghost,
+                        onClick = { pendingBindRadio = null }, modifier = Modifier.weight(1f))
+                    CliButton(text = "BIND", variant = CliButtonVariant.Primary,
+                        onClick = { confirmRadioBind() }, modifier = Modifier.weight(1f))
+                }
+            }
+        }
+    }
+
     // Industrial Passphrase Prompt Dialog
     if (showPasswordDialog) {
         Dialog(onDismissRequest = {
             showPasswordDialog = false
             isPasswordVisible = false
+            preferRadioForPassword = null
         }) {
             CliPanel(
                 borderColor = CliBorderActive,
@@ -806,13 +867,16 @@ fun MainScreen(viewModel: MainViewModel) {
                     advertised.isOpen || advertised.isOwe
                 } ?: (wifiStatus.securityType == "0" || wifiStatus.securityType == "6" || wifiStatus.securityType == "open")
 
-                val promptSsid = targetRadioForPassword?.ssid?.ifEmpty { wifiStatus.ssid } ?: wifiStatus.ssid
+                val promptSsid = (preferRadioForPassword ?: targetRadioForPassword)?.ssid?.ifEmpty { wifiStatus.ssid } ?: wifiStatus.ssid
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = if (promptSsid.isNotEmpty()) "Network: \"$promptSsid\"" else "Network Credentials",
                     style = Typography.titleMedium,
                     color = CliTextPrimary
                 )
+                preferRadioForPassword?.let { radio ->
+                    Text("Target BSSID: ${radio.bssid}", style = CliTypography.CodeMono, color = CliTextSecondary)
+                }
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = if (isTargetOpen)
@@ -868,26 +932,35 @@ fun MainScreen(viewModel: MainViewModel) {
                     CliButton(
                         text = "CANCEL",
                         variant = CliButtonVariant.Ghost,
-                        onClick = { showPasswordDialog = false },
+                        onClick = {
+                            showPasswordDialog = false
+                            preferRadioForPassword = null
+                        },
                         modifier = Modifier.weight(1f)
                     )
                     CliButton(
-                        text = "BIND & LOCK",
+                        text = if (preferRadioForPassword != null) "PREFER 5 GHZ" else "BIND & LOCK",
                         variant = CliButtonVariant.Primary,
                         onClick = {
                             if (isTargetOpen || passwordInput.isNotBlank()) {
-                                val source = "main_screen_password_dialog_bind_lock"
+                                val source = if (preferRadioForPassword != null) "main_screen_password_dialog_prefer_5ghz"
+                                    else "main_screen_password_dialog_bind_lock"
                                 val correlationId = DiagnosticLogger.newCorrelationId()
                                 showPasswordDialog = false
                                 val target = targetRadioForPassword
+                                val preferTarget = preferRadioForPassword
+                                preferRadioForPassword = null
                                 val pass = if (isTargetOpen) "" else passwordInput
-                                val targetSsid = target?.ssid?.ifEmpty { wifiStatus.ssid } ?: wifiStatus.ssid
+                                val targetSsid = (preferTarget ?: target)?.ssid?.ifEmpty { wifiStatus.ssid } ?: wifiStatus.ssid
                                 DiagnosticLogger.log(
                                     "USER_ACTION",
-                                    "id=$correlationId source=$source callback=bind_and_lock targetSsid='$targetSsid' targetBssid=${target?.bssid ?: "auto_5ghz"} connected=${wifiStatus.isConnected} currentBssid=${wifiStatus.bssid} band=${wifiStatus.band.displayName} rssi=${wifiStatus.rssi}"
+                                    "id=$correlationId source=$source callback=${if (preferTarget != null) "prefer_5ghz" else "bind_and_lock"} targetSsid='$targetSsid' targetBssid=${(preferTarget ?: target)?.bssid ?: "auto_5ghz"} connected=${wifiStatus.isConnected} currentBssid=${wifiStatus.bssid} band=${wifiStatus.band.displayName} rssi=${wifiStatus.rssi}"
                                 )
                                 executeWithMacPolicyCheck(targetSsid) {
-                                    if (target != null) {
+                                    if (preferTarget != null) {
+                                        viewModel.forceLock5Ghz(pass, approvedBssid = preferTarget.bssid,
+                                            requestSource = source, correlationId = correlationId)
+                                    } else if (target != null) {
                                         viewModel.lockToSpecificRadio(target, pass, requestSource = source, correlationId = correlationId)
                                     } else {
                                         viewModel.forceLock5Ghz(pass, requestSource = source, correlationId = correlationId)
@@ -1214,6 +1287,7 @@ fun CliShizukuPanel(
 fun CliConnectedHeroPanel(
     status: WifiStatus,
     isOperating: Boolean,
+    recoveryThresholdRssi: Int,
     onToggleLock: () -> Unit,
     onOpenGraph: (() -> Unit)? = null,
     onGetMacPolicy: ((String) -> MacAddressPolicy?)? = null,
@@ -1450,6 +1524,14 @@ fun CliConnectedHeroPanel(
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
+                if (status.isPreferred5GHz || status.isPreferred5GHzFallback) {
+                    Text(
+                        text = "5 GHz RECOVERY ≥ $recoveryThresholdRssi dBm",
+                        style = CliTypography.CodeMono,
+                        color = CliTextSecondary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
                 CliDivider(color = CliBorderSubtle)
                 Spacer(modifier = Modifier.height(8.dp))
 
