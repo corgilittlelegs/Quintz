@@ -56,7 +56,9 @@ ndkBuild/
 
 # Signing keys & secrets
 *.jks
-!keystore/release.jks
+keystore/*.bin
+keystore/*password*.txt
+keystore/github-actions-secrets.env
 *.keystore
 *.pem
 *.key
@@ -66,4 +68,3 @@ signing.properties
 key.properties
 google-services.json
 .env*
-

@@ -7,7 +7,8 @@ data class CandidateSample(
     val ssid: String,
     val rssi: Int,
     val channel: Int,
-    val band: BandType
+    val band: BandType,
+    val observedAtMillis: Long = 0L
 )
 
 data class RoamEvent(
@@ -34,7 +35,8 @@ data class CandidateMeta(
     val channel: Int,
     val band: BandType,
     val latestRssi: Int,
-    val colorIndex: Int
+    val colorIndex: Int,
+    val observedAtMillis: Long = 0L
 )
 
 data class TelemetryGraphState(
@@ -50,5 +52,12 @@ data class TelemetryGraphState(
     val bestCandidateBssid: String? = null,
     val roamAdvantageDbm: Int = 0,
     val isPaused: Boolean = false,
-    val selectedCandidateBssid: String? = null
+    val selectedCandidateBssid: String? = null,
+    val nowTimestampMillis: Long = 0L,
+    val lastStatusObservedAtMillis: Long = 0L,
+    val lastScanAttemptedAtMillis: Long = 0L,
+    val lastScanCompletedAtMillis: Long = 0L,
+    val lastScanSucceeded: Boolean? = null,
+    val lastScanDurationMillis: Long? = null,
+    val lastScanWasCoalesced: Boolean = false
 )

@@ -10,7 +10,9 @@ enum class WifiTargetMode { AUTO, PREFER_5_GHZ, PIN_BSSID }
 
 class Preferences(context: Context) {
 
-    private val prefs: SharedPreferences = try {
+    private val fallbackPrefs = context.getSharedPreferences("prefs", Context.MODE_PRIVATE)
+    private var legacyPasswordCleanupSucceeded = true
+    private val securePrefs: SharedPreferences? = try {
         val masterKey = MasterKey.Builder(context)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
             .build()
@@ -23,21 +25,99 @@ class Preferences(context: Context) {
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
         )
     } catch (e: Exception) {
-        // Fallback to standard private prefs if Keystore is temporarily unavailable
-        context.getSharedPreferences("prefs", Context.MODE_PRIVATE)
+        null
+    }
+    // Non-secret settings remain usable if Android Keystore is unavailable. Passwords do not.
+    private val prefs: SharedPreferences = securePrefs ?: fallbackPrefs
+
+    init {
+        // Older versions used ordinary preferences when Keystore failed. Move every supported
+        // setting, including passwords, so restoring Keystore does not lose the user's choices.
+        securePrefs?.let { secure ->
+            runCatching {
+                val legacyValues = fallbackPrefs.all
+                if (legacyValues.isNotEmpty()) {
+                    val secureEdit = secure.edit()
+                    val migratedKeys = mutableListOf<String>()
+                    legacyValues.forEach { (key, value) ->
+                        if (secure.contains(key)) {
+                            migratedKeys += key
+                        } else {
+                            when (value) {
+                                is String -> secureEdit.putString(key, value)
+                                is Boolean -> secureEdit.putBoolean(key, value)
+                                is Int -> secureEdit.putInt(key, value)
+                                is Long -> secureEdit.putLong(key, value)
+                                is Float -> secureEdit.putFloat(key, value)
+                                is Set<*> -> {
+                                    val strings = value.filterIsInstance<String>()
+                                    if (strings.size == value.size) {
+                                        secureEdit.putStringSet(key, strings.toSet())
+                                    } else return@forEach
+                                }
+                                else -> return@forEach
+                            }
+                            migratedKeys += key
+                        }
+                    }
+                    if (secureEdit.commit()) {
+                        val cleanup = fallbackPrefs.edit()
+                        migratedKeys.forEach { cleanup.remove(it) }
+                        if (!cleanup.commit() && migratedKeys.any { it.startsWith("pwd_") }) {
+                            legacyPasswordCleanupSucceeded = context.deleteSharedPreferences("prefs")
+                        }
+                    }
+                }
+            }
+        }
+        // If Keystore or migration is unavailable, do not retain an older plaintext copy.
+        // The user can enter the password again once secure storage works.
+        val plaintextPasswordKeys = fallbackPrefs.all.keys.filter { it.startsWith("pwd_") }
+        if (plaintextPasswordKeys.isNotEmpty()) {
+            val cleanup = fallbackPrefs.edit()
+            plaintextPasswordKeys.forEach { cleanup.remove(it) }
+            legacyPasswordCleanupSucceeded = if (cleanup.commit()) true else {
+                // Losing non-secret fallback settings is safer than retaining old plaintext passwords.
+                context.deleteSharedPreferences("prefs")
+            }
+        }
     }
 
-    fun savePassword(ssid: String, pass: String) {
-        prefs.edit().putString("pwd_$ssid", pass).apply()
-    }
+    val isPasswordStorageAvailable: Boolean get() = securePrefs != null && legacyPasswordCleanupSucceeded
 
-    fun getPassword(ssid: String): String? {
-        return prefs.getString("pwd_$ssid", null)
-    }
+    fun savePassword(ssid: String, pass: String): Boolean = runCatching {
+        isPasswordStorageAvailable && securePrefs?.edit()?.putString("pwd_$ssid", pass)?.commit() == true
+    }.getOrDefault(false)
+
+    fun getPassword(ssid: String): String? = runCatching {
+        securePrefs?.takeIf { isPasswordStorageAvailable }?.getString("pwd_$ssid", null)
+    }.getOrNull()
 
     fun removePassword(ssid: String) {
-        prefs.edit().remove("pwd_$ssid").apply()
+        securePrefs?.edit()?.remove("pwd_$ssid")?.apply()
+        fallbackPrefs.edit().remove("pwd_$ssid").apply()
     }
+
+    fun rememberConnectedSecurity(ssid: String, securityType: String) {
+        if (securityType == "2" || securityType == "4") {
+            prefs.edit().putString("trusted_security_$ssid", securityType).apply()
+        }
+    }
+
+    fun getTrustedSecurity(ssid: String): String? =
+        prefs.getString("trusted_security_$ssid", null)?.takeIf { it == "2" || it == "4" }
+
+    /** Only a verified, user-selected radio is eligible for later automatic steering. */
+    fun trustSelectedRadio(ssid: String, bssid: String, securityType: String): Boolean {
+        if (securityType !in setOf("0", "2", "4", "6")) return false
+        val normalizedBssid = bssid.lowercase()
+        if (!normalizedBssid.matches(Regex("([0-9a-f]{2}:){5}[0-9a-f]{2}"))) return false
+        return prefs.edit().putString("trusted_radio_${ssid}_$normalizedBssid", securityType).commit()
+    }
+
+    fun getTrustedRadioSecurity(ssid: String, bssid: String): String? =
+        prefs.getString("trusted_radio_${ssid}_${bssid.lowercase()}", null)
+            ?.takeIf { it in setOf("0", "2", "4", "6") }
 
     fun getMacPolicy(ssid: String): MacAddressPolicy? {
         val raw = prefs.getString("mac_policy_$ssid", null) ?: return null
@@ -46,6 +126,10 @@ class Preferences(context: Context) {
 
     fun setMacPolicy(ssid: String, policy: MacAddressPolicy) {
         prefs.edit().putString("mac_policy_$ssid", policy.name).apply()
+    }
+
+    fun clearMacPolicy(ssid: String) {
+        prefs.edit().remove("mac_policy_$ssid").apply()
     }
 
     var defaultMacPolicy: MacAddressPolicy
@@ -84,7 +168,7 @@ class Preferences(context: Context) {
     /** Initializes per-network intent from the legacy global preference and observed profile. */
     fun getOrMigrateWifiTargetMode(ssid: String, profileBssid: String? = null): WifiTargetMode {
         getWifiTargetMode(ssid)?.let { return it }
-        val isLegacyTargetNetwork = watchdogLastSsid?.let { it.equals(ssid, ignoreCase = true) } ?: true
+        val isLegacyTargetNetwork = watchdogLastSsid == ssid
         val mode = when {
             !profileBssid.isNullOrBlank() -> WifiTargetMode.PIN_BSSID
             !prefs.contains("last_target_band") -> WifiTargetMode.AUTO

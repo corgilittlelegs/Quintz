@@ -35,6 +35,9 @@ data class WifiStatus(
     val standard: String = "",
     val ipAddress: String = "",
     val securityType: String = "",
+    val networkId: Int? = null,
+    val observedAtMillis: Long = 0L,
+    val nativeIdentityLimited: Boolean = false,
     val isLockedToBssid: Boolean = false,
     val lockedBssid: String? = null,
     val isPreferred5GHz: Boolean = false,
@@ -53,7 +56,8 @@ data class AccessPointRadio(
     val rssi: Int,
     val flags: String,
     val isCurrent: Boolean = false,
-    val ageSeconds: Long = 0L
+    val ageSeconds: Long = 0L,
+    val observedAtMillis: Long = 0L
 ) {
     companion object {
         fun frequencyToChannel(freq: Int): Int = when (freq) {

@@ -38,6 +38,7 @@ import androidx.compose.ui.window.Dialog
 import com.quintz.wifi.BuildConfig
 import com.quintz.wifi.R
 import com.quintz.wifi.core.DiagnosticLogger
+import com.quintz.wifi.core.WifiSecurityPolicy
 import com.quintz.wifi.model.AccessPointRadio
 import com.quintz.wifi.model.BandType
 import com.quintz.wifi.model.MacAddressPolicy
@@ -264,6 +265,9 @@ fun MainScreen(viewModel: MainViewModel) {
                 .padding(paddingValues)
         ) {
             val isWideScreen = maxWidth >= 760.dp
+            LaunchedEffect(isWideScreen, selectedRightPane, selectedPhoneTab) {
+                viewModel.setScannerActive(isWideScreen || selectedPhoneTab != PhoneTab.CONTROLS)
+            }
 
             if (isWideScreen) {
                 // ── Two-Pane Mission Control (Tablets & Landscape) ──
@@ -459,9 +463,8 @@ fun MainScreen(viewModel: MainViewModel) {
                                                             "USER_ACTION",
                                                             "id=$correlationId source=$source callback=radio_lock_button targetSsid='${radio.ssid}' targetBssid=${radio.bssid} band=${radio.band.displayName} rssi=${radio.rssi} currentSsid='${wifiStatus.ssid}' currentBssid=${wifiStatus.bssid} currentBand=${wifiStatus.band.displayName} currentRssi=${wifiStatus.rssi}"
                                                         )
-                                                        val isOpen = radio.flags.uppercase().let {
-                                                            !it.contains("PSK") && !it.contains("SAE") && !it.contains("WEP")
-                                                        }
+                                                        val advertised = WifiSecurityPolicy.fromFlags(radio.flags)
+                                                        val isOpen = advertised.isOpen || advertised.isOwe
                                                         val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
                                                         if (isOpen) {
                                                             executeWithMacPolicyCheck(targetSsid) {
@@ -492,6 +495,7 @@ fun MainScreen(viewModel: MainViewModel) {
                                 RightPaneView.GRAPH -> {
                                     WifiGraphView(
                                         state = telemetryState,
+                                        ageClock = viewModel.telemetryClock,
                                         onTogglePause = { viewModel.togglePauseTelemetry() },
                                         onClearHistory = { viewModel.clearTelemetryHistory() },
                                         onSelectCandidate = { viewModel.selectCandidateBssid(it) },
@@ -722,9 +726,8 @@ fun MainScreen(viewModel: MainViewModel) {
                                                         "USER_ACTION",
                                                         "id=$correlationId source=$source callback=radio_lock_button targetSsid='${radio.ssid}' targetBssid=${radio.bssid} band=${radio.band.displayName} rssi=${radio.rssi} currentSsid='${wifiStatus.ssid}' currentBssid=${wifiStatus.bssid} currentBand=${wifiStatus.band.displayName} currentRssi=${wifiStatus.rssi}"
                                                     )
-                                                    val isOpen = radio.flags.uppercase().let {
-                                                            !it.contains("PSK") && !it.contains("SAE") && !it.contains("WEP")
-                                                        }
+                                                    val advertised = WifiSecurityPolicy.fromFlags(radio.flags)
+                                                    val isOpen = advertised.isOpen || advertised.isOwe
                                                         val targetSsid = radio.ssid.ifEmpty { wifiStatus.ssid }
                                                         if (isOpen) {
                                                         executeWithMacPolicyCheck(targetSsid) {
@@ -756,6 +759,7 @@ fun MainScreen(viewModel: MainViewModel) {
                             PhoneTab.GRAPH -> {
                                 WifiGraphView(
                                     state = telemetryState,
+                                    ageClock = viewModel.telemetryClock,
                                     onTogglePause = { viewModel.togglePauseTelemetry() },
                                     onClearHistory = { viewModel.clearTelemetryHistory() },
                                     onSelectCandidate = { viewModel.selectCandidateBssid(it) },
@@ -798,9 +802,9 @@ fun MainScreen(viewModel: MainViewModel) {
                     color = CliAccent5GHz
                 )
                 val isTargetOpen = targetRadioForPassword?.let {
-                    val upper = it.flags.uppercase()
-                    !upper.contains("PSK") && !upper.contains("SAE") && !upper.contains("WEP")
-                } ?: (wifiStatus.securityType == "0" || wifiStatus.securityType == "open")
+                    val advertised = WifiSecurityPolicy.fromFlags(it.flags)
+                    advertised.isOpen || advertised.isOwe
+                } ?: (wifiStatus.securityType == "0" || wifiStatus.securityType == "6" || wifiStatus.securityType == "open")
 
                 val promptSsid = targetRadioForPassword?.ssid?.ifEmpty { wifiStatus.ssid } ?: wifiStatus.ssid
                 Spacer(modifier = Modifier.height(8.dp))
@@ -1278,12 +1282,24 @@ fun CliConnectedHeroPanel(
 
         Text(
             text = if (status.isConnected && status.ipAddress.isNotEmpty()) "IP: ${status.ipAddress}"
-                   else if (status.isConnected) "Connected • Start Shizuku for BSSID"
+                   else if (status.isConnected) "Connected • Wi-Fi details unavailable"
                    else if (isOperating) "Binding to target AP & verifying DHCP..."
                    else "Connect to Wi-Fi",
             style = CliTypography.CodeMono,
             color = CliTextTertiary
         )
+
+        if (status.isConnected && status.nativeIdentityLimited) {
+            val hiddenFields = listOfNotNull(
+                "SSID".takeIf { status.ssid.isEmpty() },
+                "BSSID".takeIf { status.bssid.isEmpty() }
+            ).joinToString("/")
+            Text(
+                text = "Basic status • $hiddenFields not provided by Android",
+                style = CliTypography.CodeMono,
+                color = CliTextTertiary
+            )
+        }
 
         if (isOperating) {
             Spacer(modifier = Modifier.height(8.dp))
@@ -1449,7 +1465,7 @@ fun CliConnectedHeroPanel(
                     )
 
                     Text(
-                        text = if (status.bssid.isNotEmpty()) status.bssid else "Hidden (Requires Shizuku)",
+                        text = if (status.bssid.isNotEmpty()) status.bssid else "Hidden (limited native status)",
                         style = CliTypography.CodeMono,
                         color = if (status.bssid.isNotEmpty()) CliTextSecondary else CliTextTertiary,
                         fontSize = 11.5.sp
@@ -1501,7 +1517,7 @@ fun CliConnectedHeroPanel(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "SMART FALLBACK",
+                            text = "WATCHDOG",
                             style = CliTypography.TelemetryLabel
                         )
 
@@ -1513,12 +1529,18 @@ fun CliConnectedHeroPanel(
                                 modifier = Modifier
                                     .size(7.dp)
                                     .clip(CircleShape)
-                                    .background(if (status.isPreferred5GHzFallback) CliAccent24GHz else if (isWatchdogActive) CliAccentGreen else CliTextTertiary)
+                                    .background(if (isWatchdogActive && status.isPreferred5GHzFallback) CliAccent24GHz else if (isWatchdogActive) CliAccentGreen else CliTextTertiary)
                             )
                             Text(
-                                text = if (status.isPreferred5GHzFallback) "ACTIVE (Auto-recovery pending)" else if (isWatchdogActive) "ARMED (-82 dBm safety)" else "STANDBY",
+                                text = when {
+                                    !isWatchdogActive -> "OFF"
+                                    status.isPreferred5GHzFallback -> "ON · 5 GHz recovery pending"
+                                    status.isLockedToBssid -> "ON · monitoring pin"
+                                    status.isPreferred5GHz -> "ON · monitoring 5 GHz"
+                                    else -> "ON · Auto on this network"
+                                },
                                 style = CliTypography.CodeMono,
-                                color = if (status.isPreferred5GHzFallback) CliAccent24GHz else if (isWatchdogActive) CliAccentGreen else CliTextTertiary,
+                                color = if (isWatchdogActive && status.isPreferred5GHzFallback) CliAccent24GHz else if (isWatchdogActive) CliAccentGreen else CliTextTertiary,
                                 fontSize = 11.5.sp
                             )
                         }

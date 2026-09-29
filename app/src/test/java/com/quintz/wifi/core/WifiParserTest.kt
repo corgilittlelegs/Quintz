@@ -122,6 +122,7 @@ class WifiParserTest {
         assertEquals(BandType.BAND_5_GHZ, status.band)
         assertEquals(-67, status.rssi)
         assertEquals("192.168.0.102", status.ipAddress)
+        assertEquals(17, status.networkId)
         assertTrue(status.isLockedToBssid)
         assertEquals("30:de:4b:31:55:30", status.lockedBssid)
     }
@@ -132,13 +133,23 @@ class WifiParserTest {
             Network Id      SSID                         Security type
             0            Anubis                           wpa2-psk
             1            Archer                           wpa2-psk
-            1            Archer                           wpa3-sae
+            3            Archer                           wpa3-sae
             2            My Home Network                  wpa2-psk
+            4            Home                             wpa2-psk
+            5            Home 5G                          wpa2-psk
+            6            home                             wpa2-psk
         """.trimIndent()
 
-        assertEquals(1, WifiParser.parseNetworkId(listNetworksOutput, "Archer"))
-        assertEquals(0, WifiParser.parseNetworkId(listNetworksOutput, "Anubis"))
-        assertEquals(2, WifiParser.parseNetworkId(listNetworksOutput, "My Home Network"))
-        assertNull(WifiParser.parseNetworkId(listNetworksOutput, "UnknownNetwork"))
+        assertEquals(1, WifiParser.parseNetworkId(listNetworksOutput, "Archer", 1, "2"))
+        assertEquals(0, WifiParser.parseNetworkId(listNetworksOutput, "Anubis", 0, "2"))
+        assertEquals(2, WifiParser.parseNetworkId(listNetworksOutput, "My Home Network", 2, "2"))
+        assertEquals(4, WifiParser.parseNetworkId(listNetworksOutput, "Home", 4, "2"))
+        assertNull(WifiParser.parseNetworkId(listNetworksOutput, "Home", 5, "2"))
+        assertNull(WifiParser.parseNetworkId(listNetworksOutput, "Home", 6, "2"))
+        assertNull(WifiParser.parseNetworkId(listNetworksOutput, "Archer", 3, "2"))
+        assertNull(WifiParser.parseNetworkId(listNetworksOutput, "Archer", null, "2"))
+        assertNull(WifiParser.parseNetworkId(listNetworksOutput, "UnknownNetwork", 1, "2"))
+        assertEquals(9, WifiParser.parseNetworkId("9\tTab network\twpa2-psk", "Tab network", 9, "2"))
+        assertNull(WifiParser.parseNetworkId("9\tTab network\twpa2-psk", "Tab network", 9, "4"))
     }
 }

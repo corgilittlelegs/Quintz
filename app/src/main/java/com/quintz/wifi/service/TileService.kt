@@ -10,6 +10,7 @@ import com.quintz.wifi.R
 import com.quintz.wifi.core.DiagnosticLogger
 import com.quintz.wifi.core.WifiController
 import com.quintz.wifi.data.Preferences
+import com.quintz.wifi.data.WifiTargetMode
 import com.quintz.wifi.model.BandType
 import com.quintz.wifi.shizuku.ShizukuManager
 import com.quintz.wifi.ui.MainActivity
@@ -94,34 +95,43 @@ class TileService : android.service.quicksettings.TileService() {
                 }
 
                 val password = prefs.getPassword(current.ssid)
+                val isOpen = current.securityType == "0" || current.securityType == "6"
+                val shellSecurity = when (current.securityType) {
+                    "0" -> "open"
+                    "6" -> "owe"
+                    "4" -> "wpa3"
+                    else -> "wpa2"
+                }
 
-                if (current.isSteeredOrLocked) {
+                if (prefs.getOrMigrateWifiTargetMode(current.ssid, current.lockedBssid) != WifiTargetMode.AUTO) {
                     // Currently steered or locked -> Unlock to Auto
-                    withContext(Dispatchers.Main) {
-                        tile.state = Tile.STATE_INACTIVE
-                        tile.label = "Quintz"
-                        tile.subtitle = "Auto-Roam"
-                        tile.updateTile()
-                        Toast.makeText(this@TileService, "Quintz: Unlocking to Auto-Roam...", Toast.LENGTH_SHORT).show()
-                    }
                     val policy = prefs.getMacPolicy(current.ssid) ?: prefs.defaultMacPolicy
                     val success = controller.unlockToAuto(
                         current.ssid,
                         password,
+                        securityType = shellSecurity,
                         macAddressPolicy = policy,
                         requestSource = "quick_settings_tile",
                         correlationId = correlationId
                     )
                     DiagnosticLogger.log("USER_ACTION", "id=$correlationId source=quick_settings_tile result=${if (success) "success" else "failure"} action=unlock_to_auto")
                     withContext(Dispatchers.Main) {
-                        Toast.makeText(this@TileService, "Quintz: Switched to Auto-Roam", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this@TileService, if (success) "Quintz: Auto-Roam active" else "Quintz: Could not verify Auto-Roam; try again in the app", Toast.LENGTH_LONG).show()
                     }
                 } else {
                     // Auto mode -> Prefer 5 GHz
                     val policy = prefs.getMacPolicy(current.ssid) ?: prefs.defaultMacPolicy
-                    if (!password.isNullOrEmpty()) {
+                    if (isOpen) {
+                        // Same-name open access points cannot be authenticated as one network.
+                        // Require an explicit radio choice in the app instead of an automatic handoff.
                         withContext(Dispatchers.Main) {
-                            tile.state = Tile.STATE_ACTIVE
+                            tile.subtitle = "Choose a radio in app"
+                            tile.updateTile()
+                            Toast.makeText(this@TileService, "Quintz: Open Wi-Fi needs a specific radio selection in the app", Toast.LENGTH_LONG).show()
+                            openMainActivityFromTile()
+                        }
+                    } else if (!password.isNullOrEmpty()) {
+                        withContext(Dispatchers.Main) {
                             tile.label = "Quintz"
                             tile.subtitle = "Steering to 5 GHz..."
                             tile.updateTile()
@@ -139,7 +149,12 @@ class TileService : android.service.quicksettings.TileService() {
                             if (success) {
                                 Toast.makeText(this@TileService, "Quintz: Preferred 5 GHz active (Roam Allowed)", Toast.LENGTH_SHORT).show()
                             } else {
-                                Toast.makeText(this@TileService, "Quintz: No 5 GHz radio found", Toast.LENGTH_SHORT).show()
+                                val message = if (controller.lastPasswordStorageFailure) {
+                                    "Quintz: Secure password storage is unavailable. Unlock the device and retry in the app"
+                                } else {
+                                    "Quintz: Choose and connect to a 5 GHz radio in the app once to trust it"
+                                }
+                                Toast.makeText(this@TileService, message, Toast.LENGTH_LONG).show()
                             }
                         }
                     } else {
@@ -149,29 +164,32 @@ class TileService : android.service.quicksettings.TileService() {
                             tile.updateTile()
                             Toast.makeText(this@TileService, "Quintz: Open app to save Wi-Fi password first", Toast.LENGTH_LONG).show()
                         }
-                        val appIntent = Intent(this@TileService, MainActivity::class.java).apply {
-                            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                        }
-                        if (Build.VERSION.SDK_INT >= 34) {
-                            val pendingIntent = PendingIntent.getActivity(
-                                this@TileService, 0, appIntent,
-                                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                            )
-                            startActivityAndCollapse(pendingIntent)
-                        } else {
-                            @Suppress("DEPRECATION")
-                            startActivityAndCollapse(appIntent)
-                        }
+                        withContext(Dispatchers.Main) { openMainActivityFromTile() }
                     }
                 }
 
                 updateTileState()
             } catch (e: Exception) {
-                DiagnosticLogger.log("USER_ACTION", "id=$correlationId source=quick_settings_tile result=exception type=${e.javaClass.simpleName} message=${e.message}")
+                DiagnosticLogger.log("USER_ACTION", "id=$correlationId source=quick_settings_tile result=exception type=${e.javaClass.simpleName}")
                 android.util.Log.e("TileService", "Error handling tile click", e)
             } finally {
                 isClickHandling = false
             }
+        }
+    }
+
+    private fun openMainActivityFromTile() {
+        val appIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        if (Build.VERSION.SDK_INT >= 34) {
+            val pendingIntent = PendingIntent.getActivity(
+                this, 0, appIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            startActivityAndCollapse(pendingIntent)
+        } else {
+            @Suppress("DEPRECATION")
+            startActivityAndCollapse(appIntent)
         }
     }
 

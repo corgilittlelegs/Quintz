@@ -177,14 +177,14 @@ object ShizukuManager {
         if (!isReady()) {
             android.util.Log.w(tag, "exec called but Shizuku not ready: ${_state.value}")
             val correlation = correlationId?.let { " id=$it" }.orEmpty()
-            DiagnosticLogger.log("CMD", "✗ Blocked (Shizuku not ready)$correlation: ${DiagnosticLogger.sanitize(command)}")
+            DiagnosticLogger.log("CMD", "✗ Blocked (Shizuku not ready)$correlation: ${DiagnosticLogger.commandName(command)}")
             return ShellResult(-1, "", "Shizuku service not available or permission denied")
         }
         val method = newProcessMethod ?: return ShellResult(-1, "", "newProcess method unavailable")
 
         val startTime = System.currentTimeMillis()
         return try {
-            android.util.Log.d(tag, "executing command${correlationId?.let { " id=$it" }.orEmpty()}: ${DiagnosticLogger.sanitize(command)}")
+            android.util.Log.d(tag, "executing command${correlationId?.let { " id=$it" }.orEmpty()}: ${DiagnosticLogger.commandName(command)}")
             val process = method.invoke(
                 null,
                 arrayOf("sh", "-c", command),
@@ -224,13 +224,13 @@ object ShizukuManager {
                 waitFuture.get(timeoutSeconds, TimeUnit.SECONDS)
             } catch (e: TimeoutException) {
                 val correlation = correlationId?.let { " id=$it" }.orEmpty()
-                android.util.Log.w(tag, "Command timed out after ${timeoutSeconds}s$correlation: ${DiagnosticLogger.sanitize(command)}")
+                android.util.Log.w(tag, "Command timed out after ${timeoutSeconds}s$correlation: ${DiagnosticLogger.commandName(command)}")
                 try { process.destroy() } catch (_: Exception) {}
                 waitFuture.cancel(true)
                 stdoutFuture.cancel(true)
                 stderrFuture.cancel(true)
                 val duration = System.currentTimeMillis() - startTime
-                DiagnosticLogger.log("CMD", "✗ Timeout after ${duration}ms$correlation: ${DiagnosticLogger.sanitize(command)}")
+                DiagnosticLogger.log("CMD", "✗ Timeout after ${duration}ms$correlation: ${DiagnosticLogger.commandName(command)}")
                 return ShellResult(-1, "", "Command timed out after ${timeoutSeconds}s")
             }
 
@@ -240,18 +240,18 @@ object ShizukuManager {
             val stdout = stdoutBuilder.toString().trim()
             val stderr = stderrBuilder.toString().trim()
             val duration = System.currentTimeMillis() - startTime
-            DiagnosticLogger.logCommand(command, code, duration, stdout, stderr, correlationId)
+            DiagnosticLogger.logCommand(command, code, duration, correlationId)
             android.util.Log.d(
                 tag,
-                "command completed ($code)${correlationId?.let { " id=$it" }.orEmpty()}, stdout length: ${stdout.length}, stderr: ${DiagnosticLogger.sanitize(stderr).take(120)}"
+                "command completed ($code)${correlationId?.let { " id=$it" }.orEmpty()}, stdout length: ${stdout.length}, stderr length: ${stderr.length}"
             )
             ShellResult(code, stdout, stderr)
         } catch (e: Exception) {
             val duration = System.currentTimeMillis() - startTime
             val correlation = correlationId?.let { " id=$it" }.orEmpty()
-            DiagnosticLogger.log("CMD", "✗ Exception (${duration}ms)$correlation: ${e.message} on ${DiagnosticLogger.sanitize(command)}")
-            android.util.Log.e(tag, "Command execution error", e)
-            ShellResult(-1, "", e.message ?: "Execution error")
+            DiagnosticLogger.log("CMD", "✗ Exception (${duration}ms)$correlation: ${e.javaClass.simpleName} on ${DiagnosticLogger.commandName(command)}")
+            android.util.Log.e(tag, "Command execution error (${DiagnosticLogger.commandName(command)}): ${e.javaClass.simpleName}")
+            ShellResult(-1, "", "Command execution error")
         }
     }
 

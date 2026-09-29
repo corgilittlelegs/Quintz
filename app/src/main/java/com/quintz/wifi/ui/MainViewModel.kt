@@ -13,7 +13,9 @@ import androidx.lifecycle.viewModelScope
 import com.quintz.wifi.R
 import com.quintz.wifi.core.DiagnosticLogger
 import com.quintz.wifi.core.WifiController
+import com.quintz.wifi.core.WifiSecurityPolicy
 import com.quintz.wifi.data.Preferences
+import com.quintz.wifi.data.WifiTargetMode
 import com.quintz.wifi.model.AccessPointRadio
 import com.quintz.wifi.model.BandType
 import com.quintz.wifi.model.ShizukuState
@@ -38,13 +40,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val controller = WifiController(application)
     val prefs = Preferences(application)
 
+    private val securePasswordError = "Cannot save the Wi-Fi password securely. Unlock the device, check Android's secure storage, then retry. No password was saved in plain text."
+
     private val _telemetryState = MutableStateFlow(TelemetryGraphState())
     val telemetryState: StateFlow<TelemetryGraphState> = _telemetryState.asStateFlow()
+    private val _telemetryClock = MutableStateFlow(System.currentTimeMillis())
+    val telemetryClock: StateFlow<Long> = _telemetryClock.asStateFlow()
 
     private val maxTelemetrySamples = 60
     private val telemetryBuffer = ArrayDeque<TelemetrySample>()
     private var previousBssid = ""
     private var previousBand = BandType.UNKNOWN
+    private var lastRecordedStatusObservationMillis = 0L
     private var telemetryJob: Job? = null
 
     val shizukuState: StateFlow<ShizukuState> = ShizukuManager.state
@@ -66,6 +73,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var pollingJob: Job? = null
     private var scannerJob: Job? = null
     private var isForeground = false
+    private var scannerRequested = false
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
@@ -182,16 +190,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
-        startScannerPolling()
+        if (scannerRequested) startScannerPolling()
         startTelemetryPolling()
     }
 
     private fun startTelemetryPolling() {
         if (telemetryJob?.isActive == true) return
         telemetryJob = viewModelScope.launch {
+            var lastGraphRefreshMillis = 0L
             while (isActive) {
                 if (isForeground) {
-                    recordTelemetrySample()
+                    val now = System.currentTimeMillis()
+                    _telemetryClock.value = now
+                    if (now - lastGraphRefreshMillis >= 5_000L) {
+                        recordTelemetrySample()
+                        lastGraphRefreshMillis = now
+                    }
                 }
                 delay(1000)
             }
@@ -221,8 +235,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setScannerActive(active: Boolean) {
+        scannerRequested = active
         if (active) {
-            startScannerPolling()
+            if (isForeground) startScannerPolling()
         } else {
             stopScannerPolling()
         }
@@ -254,25 +269,91 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun recordTelemetrySample() {
         val status = controller.status.value
         val now = System.currentTimeMillis()
-        if (!status.isConnected || status.rssi == 0 || status.rssi <= -127) {
-            if (!status.isConnected && _telemetryState.value.activeBssid.isNotEmpty()) {
-                _telemetryState.value = _telemetryState.value.copy(
+        val scanTimestamp = controller.lastScanCompletedTimestamp
+        val baseState = _telemetryState.value.copy(
+            nowTimestampMillis = now,
+            lastStatusObservedAtMillis = status.observedAtMillis,
+            lastScanAttemptedAtMillis = controller.lastScanAttemptTimestamp,
+            lastScanCompletedAtMillis = scanTimestamp,
+            lastScanSucceeded = if (controller.lastScanAttemptTimestamp > 0L) controller.lastScanSucceeded else null,
+            lastScanDurationMillis = if (controller.lastScanAttemptTimestamp > 0L) controller.lastScanDurationMillis else null,
+            lastScanWasCoalesced = controller.lastScanWasCoalesced
+        )
+        if (!status.isConnected) {
+            synchronized(telemetryBuffer) { telemetryBuffer.clear() }
+            lastRecordedStatusObservationMillis = 0L
+            previousBssid = ""
+            previousBand = BandType.UNKNOWN
+            _telemetryState.value = baseState.copy(
+                samples = emptyList(),
+                activeBssid = "",
+                activeSsid = "",
+                activeRssi = 0,
+                activeLinkSpeedMbps = 0,
+                activeBand = BandType.UNKNOWN,
+                candidates = emptyList()
+            )
+            return
+        }
+        if (status.rssi == 0 || status.rssi <= -127) {
+            if (status.bssid.isNotEmpty()) {
+                previousBssid = status.bssid
+                previousBand = status.band
+            }
+            _telemetryState.value = if (baseState.activeBssid.isNotEmpty()) {
+                baseState.copy(
                     activeBssid = "",
                     activeSsid = "",
                     activeRssi = 0,
                     activeLinkSpeedMbps = 0,
                     activeBand = BandType.UNKNOWN
                 )
-            }
+            } else baseState
             return
         }
-        if (_telemetryState.value.isPaused) return
+
+        val currentSsid = status.ssid
+        val currentBssid = status.bssid.lowercase()
+        val apList = controller.radios.value
+        val candidatesMap = mutableMapOf<String, CandidateSample>()
+        apList.filter {
+            it.bssid.lowercase() != currentBssid &&
+                (it.ssid.isEmpty() || it.ssid == currentSsid || currentSsid.isEmpty()) &&
+                it.observedAtMillis > 0L && now - it.observedAtMillis in 0L..20_000L
+        }.forEach { ap ->
+            candidatesMap[ap.bssid.lowercase()] = CandidateSample(
+                bssid = ap.bssid,
+                ssid = ap.ssid,
+                rssi = ap.rssi,
+                channel = ap.channel,
+                band = ap.band,
+                observedAtMillis = ap.observedAtMillis
+            )
+        }
+        val candidateMetas = candidatesMap.values.sortedBy { it.bssid }.mapIndexed { idx, cand ->
+            CandidateMeta(
+                bssid = cand.bssid,
+                ssid = cand.ssid,
+                channel = cand.channel,
+                band = cand.band,
+                latestRssi = cand.rssi,
+                colorIndex = idx,
+                observedAtMillis = cand.observedAtMillis
+            )
+        }.sortedByDescending { it.latestRssi }
+        if (baseState.isPaused || status.observedAtMillis <= 0L ||
+            status.observedAtMillis <= lastRecordedStatusObservationMillis
+        ) {
+            _telemetryState.value = baseState.copy(candidates = candidateMetas)
+            return
+        }
+        lastRecordedStatusObservationMillis = status.observedAtMillis
 
         // Detect Roam Event
         var roamEvent: RoamEvent? = null
         if (previousBssid.isNotEmpty() && status.bssid.isNotEmpty() && previousBssid.lowercase() != status.bssid.lowercase()) {
             roamEvent = RoamEvent(
-                timestamp = now,
+                timestamp = status.observedAtMillis,
                 fromBssid = previousBssid,
                 toBssid = status.bssid,
                 fromBand = previousBand,
@@ -282,25 +363,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         previousBssid = status.bssid
         previousBand = status.band
 
-        // Extract candidate APs (same SSID or alternative BSSIDs)
-        val currentSsid = status.ssid
-        val currentBssid = status.bssid.lowercase()
-        val apList = controller.radios.value
-
-        val candidatesMap = mutableMapOf<String, CandidateSample>()
-        apList.filter { it.bssid.lowercase() != currentBssid && (it.ssid.isEmpty() || it.ssid == currentSsid || currentSsid.isEmpty()) }
-            .forEach { ap ->
-                candidatesMap[ap.bssid.lowercase()] = CandidateSample(
-                    bssid = ap.bssid,
-                    ssid = ap.ssid,
-                    rssi = ap.rssi,
-                    channel = ap.channel,
-                    band = ap.band
-                )
-            }
-
         val sample = TelemetrySample(
-            timestamp = now,
+            timestamp = status.observedAtMillis,
             activeBssid = status.bssid,
             activeRssi = status.rssi,
             activeLinkSpeedMbps = status.linkSpeedMbps,
@@ -311,7 +375,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         synchronized(telemetryBuffer) {
             telemetryBuffer.addLast(sample)
-            while (telemetryBuffer.size > maxTelemetrySamples) {
+            while (telemetryBuffer.size > maxTelemetrySamples ||
+                (telemetryBuffer.firstOrNull()?.timestamp ?: now) < now - 60_000L
+            ) {
                 telemetryBuffer.removeFirst()
             }
         }
@@ -321,23 +387,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val minRssi = rssiValues.minOrNull() ?: status.rssi
         val maxRssi = rssiValues.maxOrNull() ?: status.rssi
 
-        val candidateMetas = candidatesMap.values.mapIndexed { idx, cand ->
-            CandidateMeta(
-                bssid = cand.bssid,
-                ssid = cand.ssid,
-                channel = cand.channel,
-                band = cand.band,
-                latestRssi = cand.rssi,
-                colorIndex = idx
-            )
-        }.sortedByDescending { it.latestRssi }
-
-        val bestCandidate = candidateMetas.firstOrNull()
+        val bestCandidate = candidateMetas.firstOrNull { now - it.observedAtMillis <= 8_000L }
         val roamAdvantage = if (bestCandidate != null && bestCandidate.latestRssi > status.rssi) {
             bestCandidate.latestRssi - status.rssi
         } else 0
 
-        _telemetryState.value = _telemetryState.value.copy(
+        _telemetryState.value = baseState.copy(
             samples = sampleList,
             activeBssid = status.bssid,
             activeSsid = status.ssid,
@@ -391,38 +446,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         correlationId: String = DiagnosticLogger.newCorrelationId()
     ) {
         DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId source=$requestSource action=set_mac_policy ssid='$ssid' policy=${policy.displayName}")
-        prefs.setMacPolicy(ssid, policy)
         viewModelScope.launch {
-            val status = wifiStatus.value
-            if (status.isConnected && status.ssid.equals(ssid, ignoreCase = true)) {
+            val status = controller.refreshStatus()
+            if (status.isConnected && status.ssid == ssid) {
                 val pass = prefs.getPassword(ssid).orEmpty()
-                val isSecured = status.securityType != "0" && status.securityType != "open" && status.securityType != "owe"
-
-                // Only re-apply lock/network command if we have the password or it's an open network
-                if (!isSecured || pass.isNotEmpty()) {
-                    if (status.isLockedToBssid && status.bssid.isNotEmpty()) {
+                val isSecured = status.securityType != "0" && status.securityType != "6"
+                val shellSecurity = when (status.securityType) {
+                    "0" -> "open"
+                    "6" -> "owe"
+                    "4" -> "wpa3"
+                    else -> "wpa2"
+                }
+                if (isSecured && pass.isEmpty()) {
+                    _message.value = if (prefs.isPasswordStorageAvailable) "Save this network's password before applying a MAC change" else securePasswordError
+                    return@launch
+                }
+                val previousPolicy = prefs.getMacPolicy(ssid)
+                val targetMode = prefs.getOrMigrateWifiTargetMode(ssid, status.lockedBssid)
+                val success = when (targetMode) {
+                    WifiTargetMode.PIN_BSSID -> {
+                        val pinnedBssid = prefs.getPinnedBssid(ssid) ?: status.lockedBssid
+                        if (pinnedBssid.isNullOrBlank()) {
+                            _message.value = "No pinned radio is saved for this network; choose one in the app first"
+                            return@launch
+                        }
                         controller.lockToBssid(
-                            ssid,
-                            status.bssid,
-                            pass,
-                            macAddressPolicy = policy,
-                            requestSource = requestSource,
-                            correlationId = correlationId
-                        )
-                    } else {
-                        controller.unlockToAuto(
-                            ssid,
-                            pass,
-                            macAddressPolicy = policy,
-                            requestSource = requestSource,
-                            correlationId = correlationId
+                            ssid, pinnedBssid, pass, securityType = shellSecurity, macAddressPolicy = policy,
+                            requestSource = requestSource, correlationId = correlationId
                         )
                     }
-                    refreshAll()
+                    WifiTargetMode.PREFER_5_GHZ -> controller.autoSelectAndLock5Ghz(
+                        ssid, pass, policy, requestSource = requestSource, correlationId = correlationId
+                    )
+                    WifiTargetMode.AUTO -> controller.unlockToAuto(
+                        ssid, pass, securityType = shellSecurity, macAddressPolicy = policy,
+                        requestSource = requestSource, correlationId = correlationId
+                    )
                 }
-                _message.value = "Updated MAC mode to ${policy.displayName}"
+                if (success) {
+                    prefs.setMacPolicy(ssid, policy)
+                    _message.value = "MAC mode changed to ${policy.displayName}; ${targetMode.name.replace('_', ' ')} kept"
+                } else {
+                    if (previousPolicy == null) prefs.clearMacPolicy(ssid) else prefs.setMacPolicy(ssid, previousPolicy)
+                    _message.value = when {
+                        controller.lastPasswordStorageFailure -> securePasswordError
+                        targetMode == WifiTargetMode.PREFER_5_GHZ -> "MAC mode unchanged: choose and connect to a trusted 5 GHz radio in the app, then retry"
+                        else -> "MAC mode change could not be verified. Previous preference kept; check the active connection"
+                    }
+                }
+                refreshAll()
             } else {
-                _message.value = "Updated MAC mode to ${policy.displayName}"
+                prefs.setMacPolicy(ssid, policy)
+                _message.value = "MAC mode saved for the next Quintz action on this network"
             }
         }
     }
@@ -446,6 +521,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
+            if (password.isNotEmpty() && !prefs.isPasswordStorageAvailable) {
+                _message.value = securePasswordError
+                return@launch
+            }
+
             val policy = macPolicy ?: prefs.getMacPolicy(status.ssid) ?: prefs.defaultMacPolicy
             val success = controller.autoSelectAndLock5Ghz(
                 status.ssid,
@@ -457,12 +537,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId source=$requestSource result=${if (success) "success" else "failure"} action=prefer_5ghz")
             refreshAll()
             if (success) {
-                _message.value = "Preferred 5 GHz active with roaming allowed (${policy.displayName})"
-                if (!prefs.isWatchdogEnabled) {
-                    toggleWatchdog(true)
-                }
+                _message.value = "Preferred 5 GHz active with roaming allowed (${policy.displayName})" +
+                    if (prefs.isWatchdogEnabled) "" else "; turn on Watchdog for automatic recovery"
             } else {
-                _message.value = "Failed to lock to 5 GHz on \"${status.ssid}\". Check 5 GHz signal strength."
+                _message.value = if (controller.lastPasswordStorageFailure) securePasswordError
+                    else "Choose and connect to a 5 GHz radio in the app once to trust it, then retry. The radio must also be fresh and compatible."
             }
         }
     }
@@ -482,6 +561,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val status = wifiStatus.value
             val targetSsid = radio.ssid.ifEmpty { status.ssid }
             val policy = macPolicy ?: prefs.getMacPolicy(targetSsid) ?: prefs.defaultMacPolicy
+            if (password.isNotEmpty() && !prefs.isPasswordStorageAvailable) {
+                _message.value = securePasswordError
+                return@launch
+            }
             val success = controller.lockToBssid(
                 targetSsid,
                 radio.bssid,
@@ -494,12 +577,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId source=$requestSource result=${if (success) "success" else "failure"} action=lock_specific_radio targetBssid=${radio.bssid}")
             refreshAll()
             if (success) {
-                _message.value = "Locked to AP [${radio.bssid}] on ${radio.band.displayName} (${policy.displayName})"
-                if (!prefs.isWatchdogEnabled) {
-                    toggleWatchdog(true)
-                }
+                val verified = controller.status.value
+                val trusted = if (verified.isConnected && verified.ssid == targetSsid &&
+                    verified.bssid.equals(radio.bssid, ignoreCase = true)) {
+                    prefs.trustSelectedRadio(targetSsid, radio.bssid, verified.securityType)
+                } else false
+                _message.value = "Locked to AP [${radio.bssid}] on ${radio.band.displayName} (${policy.displayName})" +
+                    (if (trusted) "; trusted for future automatic steering" else "; automatic recovery is unavailable until this radio can be trusted") +
+                    (if (trusted && !prefs.isWatchdogEnabled) "; turn on Watchdog for automatic recovery" else "")
             } else {
-                _message.value = "Could not confirm lock to [${radio.bssid}]. Check signal strength."
+                _message.value = when {
+                    controller.lastPasswordStorageFailure -> securePasswordError
+                    !WifiSecurityPolicy.isSupported(radio.flags) -> "This radio's security could not be verified; no connection was changed"
+                    else -> "Could not confirm lock to [${radio.bssid}]. Check signal strength."
+                }
             }
         }
     }
@@ -520,9 +611,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             refreshAll()
             if (success) {
                 _message.value = "Reverted to Auto-Roam mode"
-                if (prefs.isWatchdogEnabled) {
-                    toggleWatchdog(false)
-                }
             } else {
                 _message.value = "Failed to unlock to Auto"
             }
@@ -540,7 +628,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 context.startService(intent)
             }
-            _message.value = "Watchdog active: Auto-fallback enabled"
+            _message.value = "Watchdog on; each network follows its saved mode"
         } else {
             context.stopService(intent)
             _message.value = "Watchdog disabled"

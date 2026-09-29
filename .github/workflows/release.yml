@@ -2,16 +2,13 @@ name: Release APK
 
 on:
   push:
-    branches:
-      - main
     tags:
       - 'v*'
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release (e.g. v1.2.6). Leave empty to auto-calculate from commit count.'
-        required: false
-        default: ''
+        description: 'Version to release (e.g. v1.2.9). Must be newer than the last release.'
+        required: true
         type: string
 
 permissions:
@@ -52,26 +49,62 @@ jobs:
             VERSION_NAME="${RAW_TAG#v}"
             TAG_NAME="v${VERSION_NAME}"
           else
-            COMMITS=$(git rev-list --count HEAD)
-            A=$(( 1 + (COMMITS / 100) ))
-            B=$(( (COMMITS / 10) % 10 ))
-            C=$(( COMMITS % 10 ))
-            VERSION_NAME="${A}.${B}.${C}"
-            TAG_NAME="v${VERSION_NAME}"
-          fi
-
-          if ! [[ "$VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Version must be semantic-version-like (for example, v1.2.6)." >&2
+            echo "A version is required for a manual release." >&2
             exit 1
           fi
 
+          if ! [[ "$VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version must be three numeric components (for example, v1.2.9)." >&2
+            exit 1
+          fi
+
+          IFS=. read -r MAJOR MINOR PATCH <<< "$VERSION_NAME"
+          if (( MINOR > 99 || PATCH > 99 )); then
+            echo "Minor and patch components must be below 100." >&2
+            exit 1
+          fi
+          VERSION_CODE=$((10#$MAJOR * 10000 + 10#$MINOR * 100 + 10#$PATCH))
+
           echo "version_name=${VERSION_NAME}" >> $GITHUB_OUTPUT
           echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
-          echo "Resolved version_name: ${VERSION_NAME}, tag_name: ${TAG_NAME}"
+          echo "version_code=${VERSION_CODE}" >> $GITHUB_OUTPUT
+          echo "Resolved version_name: ${VERSION_NAME}, version_code: ${VERSION_CODE}, tag_name: ${TAG_NAME}"
 
       - name: Build Release APK
         run: |
-          ./gradlew assembleRelease --no-daemon -PversionName="${{ steps.get_version.outputs.version_name }}"
+          ./gradlew assembleRelease --no-daemon \
+            -PversionName="${{ steps.get_version.outputs.version_name }}" \
+            -PversionCode="${{ steps.get_version.outputs.version_code }}"
+
+      - name: Sign with rotated release key
+        shell: bash
+        env:
+          LEGACY_KEYSTORE_BASE64: ${{ secrets.LEGACY_KEYSTORE_BASE64 }}
+          LEGACY_KEY_ALIAS: ${{ secrets.LEGACY_KEY_ALIAS }}
+          LEGACY_KEYSTORE_PASSWORD: ${{ secrets.LEGACY_KEYSTORE_PASSWORD }}
+          LEGACY_KEY_PASSWORD: ${{ secrets.LEGACY_KEY_PASSWORD }}
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          SIGNING_LINEAGE_BASE64: ${{ secrets.SIGNING_LINEAGE_BASE64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          : "${LEGACY_KEYSTORE_BASE64:?Missing legacy signing key secret}"
+          : "${RELEASE_KEYSTORE_BASE64:?Missing rotated signing key secret}"
+          : "${SIGNING_LINEAGE_BASE64:?Missing signing lineage secret}"
+          LEGACY_KEYSTORE="$RUNNER_TEMP/legacy-release.jks"
+          RELEASE_KEYSTORE="$RUNNER_TEMP/rotated-release.jks"
+          SIGNING_LINEAGE="$RUNNER_TEMP/signing-lineage.bin"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          export LEGACY_KEYSTORE RELEASE_KEYSTORE SIGNING_LINEAGE APKSIGNER
+          printf '%s' "$LEGACY_KEYSTORE_BASE64" | base64 --decode > "$LEGACY_KEYSTORE"
+          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RELEASE_KEYSTORE"
+          printf '%s' "$SIGNING_LINEAGE_BASE64" | base64 --decode > "$SIGNING_LINEAGE"
+          bash scripts/sign-release.sh \
+            app/build/outputs/apk/release/app-release-unsigned.apk \
+            app/build/outputs/apk/release/app-release.apk
 
       - name: Prepare APK Asset & Checksum
         id: prepare_asset

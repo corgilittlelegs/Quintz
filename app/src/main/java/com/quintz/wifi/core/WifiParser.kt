@@ -14,6 +14,7 @@ object WifiParser {
     private val STANDARD_REGEX = Regex("""Wi-Fi standard:\s*(\w+)""")
     private val IP_REGEX = Regex("""IP:\s*/?([0-9.]+)""")
     private val SEC_TYPE_REGEX = Regex("""Security type:\s*(\d+)""")
+    private val NET_ID_REGEX = Regex("""Net ID:\s*(\d+)""")
 
     /** Reads identity fields from dumpsys output even when it omits connection-state markers. */
     fun parseConnectionIdentity(output: String): Pair<String, String> {
@@ -75,6 +76,7 @@ object WifiParser {
             standard = standard,
             ipAddress = ip,
             securityType = secType,
+            networkId = NET_ID_REGEX.find(statusOutput)?.groupValues?.get(1)?.toIntOrNull(),
             isLockedToBssid = isLocked,
             lockedBssid = lockedBssid
         )
@@ -89,17 +91,22 @@ object WifiParser {
         return if (isExplicitBssid) Pair(true, candidate) else Pair(false, null)
     }
 
-    fun parseNetworkId(listNetworksOutput: String, ssid: String): Int? {
-        val cleanSsid = ssid.trim('"').trim()
-        if (cleanSsid.isEmpty()) return null
-        val regex = Regex("""^\s*(\d+)\s+${Regex.escape(cleanSsid)}\b""", RegexOption.IGNORE_CASE)
-        for (line in listNetworksOutput.lineSequence()) {
-            val match = regex.find(line)
-            if (match != null) {
-                return match.groupValues[1].toIntOrNull()
-            }
+    fun parseNetworkId(listNetworksOutput: String, ssid: String, activeNetworkId: Int?, securityType: String): Int? {
+        if (activeNetworkId == null || activeNetworkId < 0 || ssid.isEmpty()) return null
+        val rows = listNetworksOutput.lineSequence().mapNotNull { line ->
+            val columns = line.trim().split(Regex("""\t+| {2,}"""))
+            if (columns.size != 3) null else columns[0].toIntOrNull()?.let { id -> Triple(id, columns[1].trim('"'), columns[2].lowercase()) }
+        }.filter { it.first == activeNetworkId && it.second == ssid }.toList()
+        if (rows.size != 1) return null
+        val security = rows.single().third
+        val matchesSecurity = when (securityType) {
+            "0" -> security.contains("open") || security.contains("none")
+            "2" -> security.contains("wpa2") || security.contains("psk")
+            "4" -> security.contains("wpa3") || security.contains("sae")
+            "6" -> security.contains("owe")
+            else -> false
         }
-        return null
+        return activeNetworkId.takeIf { matchesSecurity }
     }
 
     fun parseScanResults(
@@ -179,7 +186,7 @@ object WifiParser {
         // 4. Highest RSSI (signal strength)
         return deduplicated.sortedWith(
             compareByDescending<AccessPointRadio> { it.isCurrent }
-                .thenByDescending { currentSsid.isNotEmpty() && it.ssid.equals(currentSsid, ignoreCase = true) }
+                .thenByDescending { currentSsid.isNotEmpty() && it.ssid == currentSsid }
                 .thenByDescending { it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ }
                 .thenByDescending { it.rssi }
         )
