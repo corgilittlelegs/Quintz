@@ -2,27 +2,69 @@ name: Release APK
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Version to release (e.g. v1.2.9). Must be newer than the last release.'
-        required: true
+      retry_tag:
+        description: 'Optional existing draft tag to rebuild and publish after a failed run (for example v1.2.11).'
+        required: false
         type: string
 
 permissions:
   contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
 
 jobs:
-  build-release:
-    name: Build & Release APK
+  prepare:
+    name: Verify main and prepare release PR
     runs-on: ubuntu-latest
+    outputs:
+      release_ready: ${{ steps.release.outputs.release_created == 'true' || inputs.retry_tag != '' }}
+      tag_name: ${{ inputs.retry_tag != '' && inputs.retry_tag || steps.release.outputs.tag_name }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        if: ${{ inputs.retry_tag == '' }}
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'gradle'
+
+      - name: Unit tests and full lint
+        if: ${{ inputs.retry_tag == '' }}
+        run: ./gradlew test lintDebug lintRelease --no-daemon --console=plain
+
+      - name: Propose release PR or create draft release after merge
+        if: ${{ inputs.retry_tag == '' }}
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build-release:
+    name: Build, sign and publish approved release
+    needs: prepare
+    if: ${{ needs.prepare.outputs.release_ready == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
+          ref: ${{ needs.prepare.outputs.tag_name }}
           fetch-depth: 0
 
       - name: Set up JDK 21
@@ -38,25 +80,13 @@ jobs:
       - name: Determine Version
         id: get_version
         env:
-          VERSION_INPUT: ${{ github.event.inputs.version }}
+          TAG_NAME: ${{ needs.prepare.outputs.tag_name }}
         run: |
-          RAW_TAG="$VERSION_INPUT"
-          if [ -n "$RAW_TAG" ]; then
-            VERSION_NAME="${RAW_TAG#v}"
-            TAG_NAME="v${VERSION_NAME}"
-          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            RAW_TAG="${{ github.ref_name }}"
-            VERSION_NAME="${RAW_TAG#v}"
-            TAG_NAME="v${VERSION_NAME}"
-          else
-            echo "A version is required for a manual release." >&2
+          if ! [[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected a version tag such as v1.2.11, got '$TAG_NAME'." >&2
             exit 1
           fi
-
-          if ! [[ "$VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Version must be three numeric components (for example, v1.2.9)." >&2
-            exit 1
-          fi
+          VERSION_NAME="${TAG_NAME#v}"
 
           IFS=. read -r MAJOR MINOR PATCH <<< "$VERSION_NAME"
           if (( MINOR > 99 || PATCH > 99 )); then
@@ -70,7 +100,7 @@ jobs:
           echo "version_code=${VERSION_CODE}" >> $GITHUB_OUTPUT
           echo "Resolved version_name: ${VERSION_NAME}, version_code: ${VERSION_CODE}, tag_name: ${TAG_NAME}"
 
-      - name: Unit tests and full lint
+      - name: Unit tests and full lint on tagged commit
         run: ./gradlew test lintDebug lintRelease --no-daemon --console=plain
 
       - name: Build Release APK
@@ -129,55 +159,20 @@ jobs:
           path: release_assets/
           retention-days: 14
 
-      - name: Generate Changelog & Release Notes
-        id: release_notes
+      - name: Attach signed APK to draft and publish
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ steps.get_version.outputs.tag_name }}
           APK_NAME: ${{ steps.prepare_asset.outputs.apk_name }}
           APK_SHA256: ${{ steps.prepare_asset.outputs.sha256 }}
-          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
-          NOTES_PATH="release-notes.md"
-          
-          # Find the previous release tag
-          PREVIOUS_TAG=$(git describe --tags --abbrev=0 "$GITHUB_SHA^" 2>/dev/null || git tag --sort=-version:refname | grep -Fxv "$TAG_NAME" | head -n 1 || true)
-          
-          if [ -n "$PREVIOUS_TAG" ]; then
-            COMMIT_RANGE="${PREVIOUS_TAG}..${GITHUB_SHA}"
-          else
-            COMMIT_RANGE="${GITHUB_SHA}"
+          set -euo pipefail
+          if [[ "$(gh release view "$TAG_NAME" --json isDraft --jq '.isDraft')" != "true" ]]; then
+            echo "Expected an existing draft release for $TAG_NAME; refusing to alter a published release." >&2
+            exit 1
           fi
-
-          append_section() {
-            local title="$1"
-            local pattern="$2"
-            local entries
-            entries=$(git log "$COMMIT_RANGE" --extended-regexp --grep="$pattern" \
-              --pretty=format:"- %s ([%h]($REPOSITORY_URL/commit/%H))" || true)
-            if [ -n "$entries" ]; then
-              printf '\n### %s\n\n%s\n' "$title" "$entries" >> "$NOTES_PATH"
-            fi
-          }
-
-          {
-            printf '# Quintz %s\n' "$TAG_NAME"
-            if [ -n "$PREVIOUS_TAG" ]; then
-              printf '\n*Changes since [%s](%s/compare/%s...%s)*\n' "$PREVIOUS_TAG" "$REPOSITORY_URL" "$PREVIOUS_TAG" "$TAG_NAME"
-            fi
-          } > "$NOTES_PATH"
-
-          append_section '🚀 New Features' '^feat'
-          append_section '🐛 Bug Fixes' '^fix'
-          append_section '⚡ Improvements & Refactoring' '^(refactor|perf)'
-          append_section '🛠️ Maintenance & CI' '^(ci|chore|build|docs|test)'
-
-          # Fallback if none of the conventional commit prefixes matched
-          if ! grep -q '^### ' "$NOTES_PATH"; then
-            printf '\n### 📝 Commits\n\n' >> "$NOTES_PATH"
-            git log "$COMMIT_RANGE" --pretty=format:"- %s ([%h]($REPOSITORY_URL/commit/%H))" >> "$NOTES_PATH" || true
-            printf '\n' >> "$NOTES_PATH"
-          fi
-
+          NOTES_PATH="$RUNNER_TEMP/release-notes.md"
+          gh release view "$TAG_NAME" --json body --jq '.body' > "$NOTES_PATH"
           {
             printf '\n---\n\n'
             printf '### 📦 Installation & Verification\n\n'
@@ -187,19 +182,6 @@ jobs:
             printf '**SHA-256 Checksum:**\n```\n%s\n```\n' "$APK_SHA256"
             printf '*(The matching `.sha256` checksum file is also attached below)*\n'
           } >> "$NOTES_PATH"
-
-          echo "path=$NOTES_PATH" >> "$GITHUB_OUTPUT"
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ steps.get_version.outputs.tag_name }}
-          target_commitish: ${{ github.sha }}
-          name: "Quintz ${{ steps.get_version.outputs.tag_name }}"
-          body_path: ${{ steps.release_notes.outputs.path }}
-          files: |
-            ${{ steps.prepare_asset.outputs.apk_path }}
-            ${{ steps.prepare_asset.outputs.checksum_path }}
-          draft: false
-          prerelease: false
+          gh release upload "$TAG_NAME" \
+            "release_assets/$APK_NAME" "release_assets/$APK_NAME.sha256" --clobber
+          gh release edit "$TAG_NAME" --notes-file "$NOTES_PATH" --draft=false
