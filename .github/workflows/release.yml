@@ -1,21 +1,21 @@
 name: Release APK
 
 on:
-  push:
-    tags:
-      - 'v*'
-  workflow_call:
-    inputs:
-      version:
-        description: 'Tag created by Release Please'
-        required: true
-        type: string
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Existing tag to rebuild (e.g. v1.3.0). New versions use the release PR.'
+      bump:
+        description: 'Version increase: patch (fixes), minor (features), or major (breaking changes)'
         required: true
-        type: string
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -30,7 +30,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ inputs.version || github.ref }}
+          ref: ${{ github.sha }}
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -45,32 +45,43 @@ jobs:
       - name: Determine Version
         id: get_version
         env:
-          VERSION_INPUT: ${{ inputs.version }}
+          RELEASE_BUMP: ${{ inputs.bump }}
         run: |
           set -euo pipefail
-          RAW_TAG="$VERSION_INPUT"
-          if [ -n "$RAW_TAG" ]; then
-            VERSION_NAME="${RAW_TAG#v}"
-            TAG_NAME="v${VERSION_NAME}"
-          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            RAW_TAG="${{ github.ref_name }}"
-            VERSION_NAME="${RAW_TAG#v}"
-            TAG_NAME="v${VERSION_NAME}"
-          else
-            echo "A version is required for a manual release." >&2
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "Run this workflow on the main branch only." >&2
             exit 1
           fi
-
-          if ! [[ "$VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Version must be three numeric components (for example, v1.2.9)." >&2
+          LATEST_TAG=$(git tag --sort=-version:refname --list 'v[0-9]*' | sed -n '1p')
+          if ! [[ "$LATEST_TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Latest release tag is missing or is not a three-part version: $LATEST_TAG" >&2
             exit 1
           fi
+          MAJOR=${BASH_REMATCH[1]}
+          MINOR=${BASH_REMATCH[2]}
+          PATCH=${BASH_REMATCH[3]}
+          case "$RELEASE_BUMP" in
+            patch) PATCH=$((PATCH + 1)) ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            *) echo "Invalid release bump: $RELEASE_BUMP" >&2; exit 1 ;;
+          esac
+          VERSION_NAME="$MAJOR.$MINOR.$PATCH"
+          TAG_NAME="v$VERSION_NAME"
 
           # v1.2.10 shipped with versionCode 10210. Count later release tags
-          # on this release line so Android's update code is independent of SemVer.
+          # on this release line and add one for the new release.
           BASE_TAG=v1.2.10
           BASE_CODE=10210
           RELEASE_SHA=$(git rev-parse HEAD)
+          if ! git merge-base --is-ancestor "$LATEST_TAG" "$RELEASE_SHA"; then
+            echo "$LATEST_TAG must be an ancestor of the release commit." >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse "$LATEST_TAG^{commit}")" == "$RELEASE_SHA" ]]; then
+            echo "A new release needs a newer commit than $LATEST_TAG." >&2
+            exit 1
+          fi
           if ! git merge-base --is-ancestor "$BASE_TAG" "$RELEASE_SHA"; then
             echo "$BASE_TAG must be an ancestor of the release commit." >&2
             exit 1
@@ -84,27 +95,13 @@ jobs:
               RELEASES_SINCE_BASE=$((RELEASES_SINCE_BASE + 1))
             fi
           done < <(git tag --list 'v*')
-          VERSION_CODE=$((BASE_CODE + RELEASES_SINCE_BASE))
+          VERSION_CODE=$((BASE_CODE + RELEASES_SINCE_BASE + 1))
           if (( VERSION_CODE <= BASE_CODE || VERSION_CODE > 2100000000 )); then
             echo "Invalid Android versionCode: $VERSION_CODE" >&2
             exit 1
           fi
-          if [[ "$(git rev-parse "$TAG_NAME^{commit}")" != "$RELEASE_SHA" ]]; then
-            echo "$TAG_NAME does not point to the release commit." >&2
-            exit 1
-          fi
-          LATEST_TAG=$(git tag --sort=-version:refname --list 'v[0-9]*' | sed -n '1p')
-          if [[ "$LATEST_TAG" != "$TAG_NAME" ]]; then
-            echo "$TAG_NAME is not the latest version tag ($LATEST_TAG)." >&2
-            exit 1
-          fi
-          PREVIOUS_TAG=$(git tag --sort=-version:refname --list 'v[0-9]*' | sed -n '2p')
-          if [[ -n "$PREVIOUS_TAG" ]] && ! git merge-base --is-ancestor "$PREVIOUS_TAG" "$RELEASE_SHA"; then
-            echo "Release commit must descend from the previous version tag ($PREVIOUS_TAG)." >&2
-            exit 1
-          fi
-          if [[ -n "$PREVIOUS_TAG" && "$(git rev-parse "$PREVIOUS_TAG^{commit}")" == "$RELEASE_SHA" ]]; then
-            echo "A new release needs a newer commit than $PREVIOUS_TAG." >&2
+          if git rev-parse -q --verify "refs/tags/$TAG_NAME" >/dev/null; then
+            echo "$TAG_NAME already exists." >&2
             exit 1
           fi
 
@@ -112,7 +109,7 @@ jobs:
           echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
           echo "version_code=${VERSION_CODE}" >> $GITHUB_OUTPUT
           echo "commit_sha=${RELEASE_SHA}" >> $GITHUB_OUTPUT
-          echo "Resolved version_name: ${VERSION_NAME}, version_code: ${VERSION_CODE}, tag_name: ${TAG_NAME}"
+          echo "Next release: ${TAG_NAME} (Android versionCode ${VERSION_CODE}) from ${RELEASE_SHA}"
 
       - name: Unit tests and full lint
         run: ./gradlew test lintDebug lintRelease --no-daemon --console=plain
@@ -184,7 +181,7 @@ jobs:
           NOTES_PATH="release-notes.md"
           
           # Find the previous release tag
-          PREVIOUS_TAG=$(git describe --tags --abbrev=0 "HEAD^" 2>/dev/null || git tag --sort=-version:refname | grep -Fxv "$TAG_NAME" | head -n 1 || true)
+          PREVIOUS_TAG=$(git tag --sort=-version:refname --list 'v[0-9]*' | sed -n '1p')
           
           if [ -n "$PREVIOUS_TAG" ]; then
             COMMIT_RANGE="${PREVIOUS_TAG}..HEAD"
@@ -234,6 +231,23 @@ jobs:
 
           echo "path=$NOTES_PATH" >> "$GITHUB_OUTPUT"
 
+      - name: Confirm main has not changed during build
+        env:
+          RELEASE_SHA: ${{ steps.get_version.outputs.commit_sha }}
+          TAG_NAME: ${{ steps.get_version.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          REMOTE_MAIN=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [[ "$REMOTE_MAIN" != "$RELEASE_SHA" ]]; then
+            echo "main changed during the build. Sync and run the release workflow again." >&2
+            exit 1
+          fi
+          EXISTING_TAG=$(git ls-remote --tags origin "refs/tags/$TAG_NAME")
+          if [[ -n "$EXISTING_TAG" ]]; then
+            echo "$TAG_NAME was created by another run." >&2
+            exit 1
+          fi
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -245,5 +259,6 @@ jobs:
           files: |
             ${{ steps.prepare_asset.outputs.apk_path }}
             ${{ steps.prepare_asset.outputs.checksum_path }}
+          fail_on_unmatched_files: true
           draft: false
           prerelease: false
