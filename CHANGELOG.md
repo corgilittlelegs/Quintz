@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/corgilittlelegs/Quintz/compare/v1.3.0...v1.4.0) (2026-09-30)
+
+
+### Features
+
+* add battery optimization prompt and status check for watchdog ([effb113](https://github.com/corgilittlelegs/Quintz/commit/effb113eae0a28b85b4311346b5416b59b28f460))
+
 ## [1.3.0](https://github.com/corgilittlelegs/Quintz/compare/v1.2.10...v1.3.0) (2026-09-30)
 
 
