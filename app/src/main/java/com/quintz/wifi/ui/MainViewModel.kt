@@ -8,6 +8,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.Build
+import android.os.PowerManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.quintz.wifi.R
@@ -65,6 +66,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _watchdogActive = MutableStateFlow(prefs.isWatchdogEnabled)
     val watchdogActive: StateFlow<Boolean> = _watchdogActive.asStateFlow()
+
+    private val _batteryOptimizationExempt = MutableStateFlow<Boolean?>(null)
+    val batteryOptimizationExempt: StateFlow<Boolean?> = _batteryOptimizationExempt.asStateFlow()
+    private val _showBatteryOptimizationPrompt = MutableStateFlow(false)
+    val showBatteryOptimizationPrompt: StateFlow<Boolean> = _showBatteryOptimizationPrompt.asStateFlow()
 
     private val _isTileAdded = MutableStateFlow(prefs.isQuickTileAdded)
     val isTileAdded: StateFlow<Boolean> = _isTileAdded.asStateFlow()
@@ -665,6 +671,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     context.startService(intent)
                 }
                 _watchdogActive.value = true
+                refreshBatteryOptimizationStatus()
                 DiagnosticLogger.log("WATCHDOG", "result=started source=preferred_5ghz")
                 _message.value = "Watchdog on; each network follows its saved mode"
                 true
@@ -678,10 +685,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             prefs.isWatchdogEnabled = false
             _watchdogActive.value = false
+            _showBatteryOptimizationPrompt.value = false
             context.stopService(intent)
             _message.value = "Watchdog disabled"
             return true
         }
+    }
+
+    fun refreshBatteryOptimizationStatus() {
+        val context = getApplication<Application>()
+        val exempt = runCatching {
+            context.getSystemService(PowerManager::class.java)
+                ?.isIgnoringBatteryOptimizations(context.packageName)
+        }.getOrNull()
+        _batteryOptimizationExempt.value = exempt
+        if (exempt == true) {
+            _showBatteryOptimizationPrompt.value = false
+        } else if (exempt == false && prefs.isWatchdogEnabled && !prefs.batteryOptimizationPromptShown) {
+            prefs.batteryOptimizationPromptShown = true
+            _showBatteryOptimizationPrompt.value = true
+        }
+    }
+
+    fun showBatteryOptimizationExplanation() {
+        _showBatteryOptimizationPrompt.value = true
+    }
+
+    fun dismissBatteryOptimizationExplanation() {
+        _showBatteryOptimizationPrompt.value = false
     }
 
     fun clearMessage() {

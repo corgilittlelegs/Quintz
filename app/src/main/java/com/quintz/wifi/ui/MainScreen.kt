@@ -1,5 +1,8 @@
 package com.quintz.wifi.ui
 
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
@@ -78,6 +81,8 @@ fun MainScreen(viewModel: MainViewModel) {
     val isScanning by viewModel.isScanning.collectAsState()
     val message by viewModel.message.collectAsState()
     val watchdogActive by viewModel.watchdogActive.collectAsState()
+    val batteryOptimizationExempt by viewModel.batteryOptimizationExempt.collectAsState()
+    val showBatteryOptimizationPrompt by viewModel.showBatteryOptimizationPrompt.collectAsState()
     val isTileAdded by viewModel.isTileAdded.collectAsState()
 
     var showPasswordDialog by remember { mutableStateOf(false) }
@@ -96,6 +101,25 @@ fun MainScreen(viewModel: MainViewModel) {
     var isPreparingPrefer by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+
+    fun openBatteryOptimizationRequest() {
+        viewModel.dismissBatteryOptimizationExplanation()
+        val request = Intent(
+            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+            Uri.parse("package:${context.packageName}")
+        )
+        val settings = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+        val appDetails = Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:${context.packageName}")
+        )
+        val opened = listOf(request, settings, appDetails).any { intent ->
+            runCatching { context.startActivity(intent) }.isSuccess
+        }
+        if (!opened) {
+            scope.launch { snackbarHostState.showSnackbar("Could not open Android battery settings.") }
+        }
+    }
 
     fun requestRadioBind(radio: AccessPointRadio, source: String) {
         pendingBindRadio = radio
@@ -389,7 +413,9 @@ fun MainScreen(viewModel: MainViewModel) {
                                 }
                             },
                             onOpenGraph = { selectedRightPane = RightPaneView.GRAPH },
-                            isWatchdogActive = watchdogActive
+                            isWatchdogActive = watchdogActive,
+                            batteryOptimizationExempt = batteryOptimizationExempt,
+                            onBatterySettings = { viewModel.showBatteryOptimizationExplanation() }
                         )
 
                         CliQuickTilePanel(
@@ -660,7 +686,9 @@ fun MainScreen(viewModel: MainViewModel) {
                                             }
                                         },
                                         onOpenGraph = { selectedPhoneTab = PhoneTab.GRAPH },
-                                        isWatchdogActive = watchdogActive
+                                        isWatchdogActive = watchdogActive,
+                                        batteryOptimizationExempt = batteryOptimizationExempt,
+                                        onBatterySettings = { viewModel.showBatteryOptimizationExplanation() }
                                     )
 
                                     CliQuickTilePanel(
@@ -1038,6 +1066,46 @@ fun MainScreen(viewModel: MainViewModel) {
         }
     }
 
+    if (showBatteryOptimizationPrompt) {
+        Dialog(onDismissRequest = { viewModel.dismissBatteryOptimizationExplanation() }) {
+            CliPanel(
+                borderColor = CliAccent24GHz,
+                containerColor = CliSurface,
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(20.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "BATTERY SETTING FOR WATCHDOG",
+                        style = CliTypography.TelemetryLabel,
+                        color = CliAccent24GHz
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "Android may delay 5 GHz recovery while this device sleeps. Allow unrestricted battery use for more reliable monitoring. This may increase battery use.",
+                        style = Typography.bodyMedium,
+                        color = CliTextPrimary
+                    )
+                    Spacer(modifier = Modifier.height(18.dp))
+                    CliButton(
+                        text = "REQUEST UNRESTRICTED",
+                        variant = CliButtonVariant.Primary,
+                        onClick = { openBatteryOptimizationRequest() },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    CliButton(
+                        text = "LATER",
+                        variant = CliButtonVariant.Ghost,
+                        onClick = { viewModel.dismissBatteryOptimizationExplanation() },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+        }
+    }
+
     if (BuildConfig.DEBUG && showDiagnosticsDialog) {
         val currentLogs = remember { mutableStateOf(DiagnosticLogger.getRecentLogs()) }
         val statusSummary = "SSID: ${wifiStatus.ssid}, BSSID: ${wifiStatus.bssid}, Band: ${wifiStatus.band.displayName}, RSSI: ${wifiStatus.rssi} dBm, Locked: ${wifiStatus.isLockedToBssid}, Shizuku: ${shizukuState.isPermissionGranted}"
@@ -1292,7 +1360,9 @@ fun CliConnectedHeroPanel(
     onOpenGraph: (() -> Unit)? = null,
     onGetMacPolicy: ((String) -> MacAddressPolicy?)? = null,
     onToggleMacPolicy: ((String) -> Unit)? = null,
-    isWatchdogActive: Boolean = false
+    isWatchdogActive: Boolean = false,
+    batteryOptimizationExempt: Boolean? = null,
+    onBatterySettings: (() -> Unit)? = null
 ) {
     val is5G = status.band == BandType.BAND_5_GHZ || status.band == BandType.BAND_6_GHZ
     val isLocked = status.isSteeredOrLocked
@@ -1588,7 +1658,7 @@ fun CliConnectedHeroPanel(
                     }
                 }
 
-                if (status.isSteeredOrLocked) {
+                if (status.isSteeredOrLocked || isWatchdogActive) {
                     Spacer(modifier = Modifier.height(8.dp))
                     CliDivider(color = CliBorderSubtle)
                     Spacer(modifier = Modifier.height(8.dp))
@@ -1624,6 +1694,25 @@ fun CliConnectedHeroPanel(
                                 style = CliTypography.CodeMono,
                                 color = if (isWatchdogActive && status.isPreferred5GHzFallback) CliAccent24GHz else if (isWatchdogActive) CliAccentGreen else CliTextTertiary,
                                 fontSize = 11.5.sp
+                            )
+                        }
+                    }
+
+                    if (isWatchdogActive && batteryOptimizationExempt == false) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .defaultMinSize(minHeight = 44.dp)
+                                .clickable(role = androidx.compose.ui.semantics.Role.Button) {
+                                    onBatterySettings?.invoke()
+                                },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "BATTERY OPTIMIZED · CONFIGURE",
+                                style = CliTypography.CodeMono,
+                                color = CliAccent24GHz
                             )
                         }
                     }

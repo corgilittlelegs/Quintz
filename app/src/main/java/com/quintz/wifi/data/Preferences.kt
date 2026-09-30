@@ -146,6 +146,10 @@ class Preferences(context: Context) {
         get() = prefs.getBoolean("watchdog_enabled", false)
         set(value) = prefs.edit().putBoolean("watchdog_enabled", value).apply()
 
+    var batteryOptimizationPromptShown: Boolean
+        get() = prefs.getBoolean("battery_optimization_prompt_shown", false)
+        set(value) = prefs.edit().putBoolean("battery_optimization_prompt_shown", value).apply()
+
     var lastTargetBand: String
         get() = prefs.getString("last_target_band", "5GHz") ?: "5GHz"
         set(value) = prefs.edit().putString("last_target_band", value).apply()

@@ -38,6 +38,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        viewModel.refreshBatteryOptimizationStatus()
         ShizukuManager.updateState(this)
         viewModel.refreshAll()
         viewModel.startForegroundPolling()
