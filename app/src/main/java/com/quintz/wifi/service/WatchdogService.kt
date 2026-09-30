@@ -215,6 +215,7 @@ class WatchdogService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        DiagnosticLogger.log("SERVICE", "WatchdogService onCreate")
         controller = WifiController(this)
         prefs = Preferences(this)
         createNotificationChannel()
@@ -234,6 +235,7 @@ class WatchdogService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        DiagnosticLogger.log("SERVICE", "WatchdogService onStartCommand startId=$startId flags=$flags intentPresent=${intent != null}")
         startServiceInForeground()
         return START_STICKY
     }
@@ -256,7 +258,13 @@ class WatchdogService : Service() {
         scope.launch {
             var fallbackScanInterval = 12000L
             var lastKnownSsid = prefs.watchdogLastSsid.orEmpty()
+            var lastHeartbeatMs = 0L
             while (isActive) {
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (now - lastHeartbeatMs >= 60_000L) {
+                    DiagnosticLogger.heartbeat(prefs.isWatchdogEnabled, ShizukuManager.isReady())
+                    lastHeartbeatMs = now
+                }
                 var loopDelay = 12000L
                 if (prefs.isWatchdogEnabled) {
                     if (!ShizukuManager.isReady()) {
@@ -498,6 +506,7 @@ class WatchdogService : Service() {
     }
 
     override fun onDestroy() {
+        DiagnosticLogger.watchdogServiceStopped()
         try {
             connectivityManager?.unregisterNetworkCallback(networkCallback)
         } catch (_: Exception) {}

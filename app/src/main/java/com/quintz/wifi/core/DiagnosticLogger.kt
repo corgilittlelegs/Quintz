@@ -4,15 +4,22 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.app.ActivityManager
 import android.os.Build
+import android.os.Process
 import android.util.Log
 import android.widget.Toast
+import androidx.core.content.FileProvider
 import com.quintz.wifi.BuildConfig
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedDeque
+import java.util.zip.ZipOutputStream
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 object DiagnosticLogger {
 
@@ -22,21 +29,33 @@ object DiagnosticLogger {
     private val entries = ConcurrentLinkedDeque<String>()
     private val timeFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     private val timeFormatLock = Any()
+    private val journalLock = Any()
+    private var journal: FlightJournal? = null
 
     fun newCorrelationId(): String = UUID.randomUUID().toString().take(8)
 
     fun initialize(context: Context) {
         if (!BuildConfig.DEBUG) return
+        val gap: FlightJournal.UnobservedInterval?
+        synchronized(journalLock) {
+            journal = FlightJournal(File(context.noBackupFilesDir, "flight-recorder"))
+            gap = journal?.unobservedInterval()
+        }
+        gap?.let {
+            log("GAP", "Unobserved watchdog interval durationMs=${it.durationMs} lastHeartbeat=${Date(it.lastHeartbeatMs)} resumed=${Date(it.resumedMs)} priorPid=${it.priorPid}; cause unknown")
+        }
         log(
             "INIT",
-            "App started on ${Build.MANUFACTURER} ${Build.MODEL} (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})"
+            "Process started pid=${Process.myPid()} on ${Build.MANUFACTURER} ${Build.MODEL} (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})"
         )
+        recordPreviousExits(context)
 
         // Capture uncaught crashes so they can be retrieved
         val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             try {
-                log("CRASH", "FATAL in thread '${thread.name}': ${throwable.stackTraceToString()}")
+                // Exception messages can contain network credentials. Keep the type and call stack.
+                log("CRASH", "FATAL thread='${thread.name}' type=${throwable.javaClass.name} stack=${throwable.stackTrace.joinToString(" <- ")}")
             } catch (_: Exception) {}
             defaultHandler?.uncaughtException(thread, throwable)
         }
@@ -46,8 +65,9 @@ object DiagnosticLogger {
         if (!BuildConfig.DEBUG) return
 
         val timestamp = synchronized(timeFormatLock) { timeFormat.format(Date()) }
-        val sanitizedMessage = sanitize(message)
-        val entry = "[$timestamp] [$tag] $sanitizedMessage"
+        val sanitizedMessage = sanitize(message.replace('\r', ' ').replace('\n', ' '))
+        val date = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        val entry = "[$date $timestamp] [pid=${Process.myPid()}] [$tag] $sanitizedMessage"
 
         entries.addLast(entry)
         while (entries.size > MAX_ENTRIES) {
@@ -55,6 +75,11 @@ object DiagnosticLogger {
         }
 
         Log.d(TAG, entry)
+        try {
+            synchronized(journalLock) { journal?.append(entry) }
+        } catch (e: Exception) {
+            Log.e(TAG, "Flight recorder write failed", e)
+        }
     }
 
     fun logCommand(
@@ -104,7 +129,76 @@ object DiagnosticLogger {
     fun clearLogs() {
         if (!BuildConfig.DEBUG) return
         entries.clear()
+        synchronized(journalLock) { journal?.clear() }
         log("DIAG", "Logs cleared by user")
+    }
+
+    fun heartbeat(enabled: Boolean, shizukuReady: Boolean) {
+        if (!BuildConfig.DEBUG) return
+        log("HEARTBEAT", "watchdog enabled=$enabled shizukuReady=$shizukuReady")
+        try {
+            synchronized(journalLock) { journal?.markHeartbeat(Process.myPid(), enabled) }
+        } catch (e: Exception) {
+            Log.e(TAG, "Heartbeat state write failed", e)
+        }
+    }
+
+    fun watchdogServiceStopped() {
+        if (!BuildConfig.DEBUG) return
+        log("SERVICE", "WatchdogService onDestroy")
+        try {
+            synchronized(journalLock) { journal?.markServiceStop() }
+        } catch (e: Exception) {
+            Log.e(TAG, "Service stop state write failed", e)
+        }
+    }
+
+    private fun recordPreviousExits(context: Context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        try {
+            val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            val previous = context.getSharedPreferences("flight_recorder", Context.MODE_PRIVATE)
+            val lastRecorded = previous.getLong("last_exit_timestamp", 0L)
+            val exits = manager.getHistoricalProcessExitReasons(context.packageName, 0, 10)
+                .filter { it.timestamp > lastRecorded && it.pid != Process.myPid() }
+                .sortedBy { it.timestamp }
+            exits.forEach { exit ->
+                log("PROCESS_EXIT", "pid=${exit.pid} reason=${exit.reason} importance=${exit.importance} time=${Date(exit.timestamp)} description=${exit.description.orEmpty()}")
+            }
+            exits.maxOfOrNull { it.timestamp }?.let { previous.edit().putLong("last_exit_timestamp", it).apply() }
+        } catch (e: Exception) {
+            log("PROCESS_EXIT", "Historical exit query failed: ${e.javaClass.simpleName}")
+        }
+    }
+
+    /** Export is one private snapshot, shared only with the app selected in Android's chooser. */
+    suspend fun shareFlightRecorder(context: Context, statusSummary: String = "") {
+        if (!BuildConfig.DEBUG) return
+        try {
+            val export = withContext(Dispatchers.IO) {
+                val exportDir = File(context.cacheDir, "diagnostic_exports").apply { mkdirs() }
+                val output = File(exportDir, "quintz-flight-recorder.zip")
+                val report = buildDiagnosticReport(context, statusSummary)
+                ZipOutputStream(output.outputStream().buffered()).use { zip ->
+                    synchronized(journalLock) { journal?.writeZip(zip, report) }
+                }
+                output
+            }
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.diagnostics", export)
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "application/zip"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, "Quintz flight recorder")
+                clipData = ClipData.newUri(context.contentResolver, "Quintz diagnostics", uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(Intent.createChooser(intent, "Share Quintz diagnostics").apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "Flight recorder export failed", e)
+            Toast.makeText(context, "Diagnostic export failed: ${e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+        }
     }
 
     fun buildDiagnosticReport(context: Context, statusSummary: String = ""): String {
@@ -118,6 +212,9 @@ object DiagnosticLogger {
         sb.appendLine("Package: ${context.packageName}")
         sb.appendLine("Version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
         sb.appendLine("Build Type: DEBUG")
+        val oldest = synchronized(journalLock) { journal?.oldestEvent() }
+            ?.substringAfter('[')?.substringBefore(']') ?: "No saved events"
+        sb.appendLine("Saved journal: up to 7 days, capped at 40 MiB; oldest retained event: $oldest")
 
         if (statusSummary.isNotEmpty()) {
             sb.appendLine("\n--- Current App State ---")

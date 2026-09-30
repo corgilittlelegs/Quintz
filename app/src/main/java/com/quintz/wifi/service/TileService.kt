@@ -25,6 +25,7 @@ class TileService : android.service.quicksettings.TileService() {
 
     override fun onCreate() {
         super.onCreate()
+        DiagnosticLogger.log("TILE", "TileService onCreate")
         controller = WifiController(this)
         prefs = Preferences(this)
     }
@@ -43,6 +44,7 @@ class TileService : android.service.quicksettings.TileService() {
 
     override fun onStartListening() {
         super.onStartListening()
+        DiagnosticLogger.log("TILE", "TileService onStartListening")
         prefs.isQuickTileAdded = true
         TileStateTracker.notifyTileState(true)
         updateTileState()

@@ -87,6 +87,7 @@ fun MainScreen(viewModel: MainViewModel) {
 
     var showPasswordDialog by remember { mutableStateOf(false) }
     var showDiagnosticsDialog by remember { mutableStateOf(false) }
+    var isExportingDiagnostics by remember { mutableStateOf(false) }
     var showMacPolicyDialog by remember { mutableStateOf(false) }
     var targetSsidForMacPolicy by remember { mutableStateOf("") }
     var pendingLockAction by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -1196,9 +1197,20 @@ fun MainScreen(viewModel: MainViewModel) {
                             modifier = Modifier.weight(1f)
                         )
                         CliButton(
-                            text = "SHARE",
+                            text = if (isExportingDiagnostics) "EXPORTING" else "EXPORT",
                             variant = CliButtonVariant.Primary,
-                            onClick = { DiagnosticLogger.shareReport(context, report) },
+                            onClick = {
+                                if (!isExportingDiagnostics) {
+                                    isExportingDiagnostics = true
+                                    scope.launch {
+                                        try {
+                                            DiagnosticLogger.shareFlightRecorder(context, statusSummary)
+                                        } finally {
+                                            isExportingDiagnostics = false
+                                        }
+                                    }
+                                }
+                            },
                             modifier = Modifier.weight(1f)
                         )
                         CliButton(
