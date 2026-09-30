@@ -4,10 +4,16 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_call:
+    inputs:
+      version:
+        description: 'Tag created by Release Please'
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release (e.g. v1.2.9). Must be newer than the last release.'
+        description: 'Existing tag to rebuild (e.g. v1.3.0). New versions use the release PR.'
         required: true
         type: string
 
@@ -24,6 +30,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ inputs.version || github.ref }}
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -38,8 +45,9 @@ jobs:
       - name: Determine Version
         id: get_version
         env:
-          VERSION_INPUT: ${{ github.event.inputs.version }}
+          VERSION_INPUT: ${{ inputs.version }}
         run: |
+          set -euo pipefail
           RAW_TAG="$VERSION_INPUT"
           if [ -n "$RAW_TAG" ]; then
             VERSION_NAME="${RAW_TAG#v}"
@@ -58,16 +66,52 @@ jobs:
             exit 1
           fi
 
-          IFS=. read -r MAJOR MINOR PATCH <<< "$VERSION_NAME"
-          if (( MINOR > 99 || PATCH > 99 )); then
-            echo "Minor and patch components must be below 100." >&2
+          # v1.2.10 shipped with versionCode 10210. Count later release tags
+          # on this release line so Android's update code is independent of SemVer.
+          BASE_TAG=v1.2.10
+          BASE_CODE=10210
+          RELEASE_SHA=$(git rev-parse HEAD)
+          if ! git merge-base --is-ancestor "$BASE_TAG" "$RELEASE_SHA"; then
+            echo "$BASE_TAG must be an ancestor of the release commit." >&2
             exit 1
           fi
-          VERSION_CODE=$((10#$MAJOR * 10000 + 10#$MINOR * 100 + 10#$PATCH))
+          RELEASES_SINCE_BASE=0
+          while IFS= read -r CANDIDATE_TAG; do
+            if [[ "$CANDIDATE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] &&
+               [[ "$CANDIDATE_TAG" != "$BASE_TAG" ]] &&
+               git merge-base --is-ancestor "$BASE_TAG" "$CANDIDATE_TAG^{commit}" &&
+               git merge-base --is-ancestor "$CANDIDATE_TAG^{commit}" "$RELEASE_SHA"; then
+              RELEASES_SINCE_BASE=$((RELEASES_SINCE_BASE + 1))
+            fi
+          done < <(git tag --list 'v*')
+          VERSION_CODE=$((BASE_CODE + RELEASES_SINCE_BASE))
+          if (( VERSION_CODE <= BASE_CODE || VERSION_CODE > 2100000000 )); then
+            echo "Invalid Android versionCode: $VERSION_CODE" >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse "$TAG_NAME^{commit}")" != "$RELEASE_SHA" ]]; then
+            echo "$TAG_NAME does not point to the release commit." >&2
+            exit 1
+          fi
+          LATEST_TAG=$(git tag --sort=-version:refname --list 'v[0-9]*' | sed -n '1p')
+          if [[ "$LATEST_TAG" != "$TAG_NAME" ]]; then
+            echo "$TAG_NAME is not the latest version tag ($LATEST_TAG)." >&2
+            exit 1
+          fi
+          PREVIOUS_TAG=$(git tag --sort=-version:refname --list 'v[0-9]*' | sed -n '2p')
+          if [[ -n "$PREVIOUS_TAG" ]] && ! git merge-base --is-ancestor "$PREVIOUS_TAG" "$RELEASE_SHA"; then
+            echo "Release commit must descend from the previous version tag ($PREVIOUS_TAG)." >&2
+            exit 1
+          fi
+          if [[ -n "$PREVIOUS_TAG" && "$(git rev-parse "$PREVIOUS_TAG^{commit}")" == "$RELEASE_SHA" ]]; then
+            echo "A new release needs a newer commit than $PREVIOUS_TAG." >&2
+            exit 1
+          fi
 
           echo "version_name=${VERSION_NAME}" >> $GITHUB_OUTPUT
           echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
           echo "version_code=${VERSION_CODE}" >> $GITHUB_OUTPUT
+          echo "commit_sha=${RELEASE_SHA}" >> $GITHUB_OUTPUT
           echo "Resolved version_name: ${VERSION_NAME}, version_code: ${VERSION_CODE}, tag_name: ${TAG_NAME}"
 
       - name: Unit tests and full lint
@@ -140,12 +184,12 @@ jobs:
           NOTES_PATH="release-notes.md"
           
           # Find the previous release tag
-          PREVIOUS_TAG=$(git describe --tags --abbrev=0 "$GITHUB_SHA^" 2>/dev/null || git tag --sort=-version:refname | grep -Fxv "$TAG_NAME" | head -n 1 || true)
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 "HEAD^" 2>/dev/null || git tag --sort=-version:refname | grep -Fxv "$TAG_NAME" | head -n 1 || true)
           
           if [ -n "$PREVIOUS_TAG" ]; then
-            COMMIT_RANGE="${PREVIOUS_TAG}..${GITHUB_SHA}"
+            COMMIT_RANGE="${PREVIOUS_TAG}..HEAD"
           else
-            COMMIT_RANGE="${GITHUB_SHA}"
+            COMMIT_RANGE="HEAD"
           fi
 
           append_section() {
@@ -195,7 +239,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: ${{ steps.get_version.outputs.tag_name }}
-          target_commitish: ${{ github.sha }}
+          target_commitish: ${{ steps.get_version.outputs.commit_sha }}
           name: "Quintz ${{ steps.get_version.outputs.tag_name }}"
           body_path: ${{ steps.release_notes.outputs.path }}
           files: |

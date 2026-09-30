@@ -1,0 +1,11 @@
+{
+  "release-type": "simple",
+  "versioning": "default",
+  "include-v-in-tag": true,
+  "include-component-in-tag": false,
+  "draft": true,
+  "force-tag-creation": true,
+  "packages": {
+    ".": {}
+  }
+}
