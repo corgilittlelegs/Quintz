@@ -36,11 +36,13 @@ data class CandidateMeta(
     val band: BandType,
     val latestRssi: Int,
     val colorIndex: Int,
+    val isInLatestScan: Boolean = false,
     val observedAtMillis: Long = 0L
 )
 
 data class TelemetryGraphState(
     val samples: List<TelemetrySample> = emptyList(),
+    val isConnected: Boolean = false,
     val activeBssid: String = "",
     val activeSsid: String = "",
     val activeRssi: Int = 0,

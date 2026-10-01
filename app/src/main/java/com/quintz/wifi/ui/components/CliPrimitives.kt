@@ -5,6 +5,8 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -39,6 +41,7 @@ fun CliPanel(
     containerColor: Color = CliSurface,
     shape: Shape = RoundedCornerShape(6.dp),
     contentPadding: PaddingValues = PaddingValues(16.dp),
+    scrollState: ScrollState? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
     Surface(
@@ -52,7 +55,8 @@ fun CliPanel(
         shadowElevation = 0.dp
     ) {
         Column(
-            modifier = Modifier.padding(contentPadding),
+            modifier = (if (scrollState != null) Modifier.verticalScroll(scrollState) else Modifier)
+                .padding(contentPadding),
             content = content
         )
     }

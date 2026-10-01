@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -40,12 +41,14 @@ import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.quintz.wifi.model.BandType
 import com.quintz.wifi.telemetry.CandidateMeta
 import com.quintz.wifi.telemetry.TelemetryGraphState
 import com.quintz.wifi.telemetry.TelemetrySample
+import com.quintz.wifi.telemetry.isFreshCandidate
 import com.quintz.wifi.ui.components.CliBadge
 import com.quintz.wifi.ui.components.CliButton
 import com.quintz.wifi.ui.components.CliButtonVariant
@@ -83,41 +86,43 @@ private data class GraphSeries(
 )
 
 private data class GraphPaths(
-    val candidatePaths: List<Path>,
-    val activePath: Path,
-    val fillPath: Path,
+    val candidatePoints: List<List<Offset>>,
+    val activeSegments: List<ActiveSegment>,
     val lastPoint: Offset?,
     val lastStatusTimestamp: Long
 )
+
+private data class ActiveSegment(val band: BandType, val line: Path, val fill: Path)
 
 private fun buildGraphPaths(series: GraphSeries, now: Long, width: Float, height: Float): GraphPaths {
     val start = now - 60_000L
     fun x(timestamp: Long) = ((timestamp - start).toFloat() / 60_000f).coerceIn(0f, 1f) * width
     fun y(rssi: Int) = height * (1f - (rssi.toFloat().coerceIn(-95f, -30f) + 95f) / 65f)
-    val candidatePaths = series.candidates.map { (_, readings) ->
-        Path().apply {
-            var previous = 0L
-            readings.forEach { reading ->
-                if (reading.rssi in -110..-20) {
-                    if (previous == 0L || reading.observedAtMillis - previous > 20_000L) {
-                        moveTo(x(reading.observedAtMillis), y(reading.rssi))
-                    } else {
-                        lineTo(x(reading.observedAtMillis), y(reading.rssi))
-                    }
-                    previous = reading.observedAtMillis
-                }
-            }
-        }
+    val candidatePoints = series.candidates.map { (_, readings) ->
+        readings.filter { it.rssi in -110..-20 }
+            .map { Offset(x(it.observedAtMillis), y(it.rssi)) }
     }
-    val active = Path()
-    val fill = Path()
+    val segments = mutableListOf<ActiveSegment>()
+    var active = Path()
+    var fill = Path()
+    var segmentBand = BandType.UNKNOWN
     var lastPoint: Offset? = null
     var lastTimestamp = 0L
+    fun finishSegment() {
+        lastPoint?.let {
+            fill.lineTo(it.x, height)
+            fill.close()
+            segments.add(ActiveSegment(segmentBand, active, fill))
+        }
+    }
     series.visibleSamples.forEach { sample ->
         if (sample.activeRssi in -110..-20) {
             val point = Offset(x(sample.timestamp), y(sample.activeRssi))
-            if (lastPoint == null || sample.timestamp - lastTimestamp > 7_500L) {
-                lastPoint?.let { fill.lineTo(it.x, height); fill.close() }
+            if (lastPoint == null || sample.timestamp - lastTimestamp > 7_500L || sample.activeBand != segmentBand) {
+                finishSegment()
+                active = Path()
+                fill = Path()
+                segmentBand = sample.activeBand
                 active.moveTo(point.x, point.y)
                 fill.moveTo(point.x, height)
                 fill.lineTo(point.x, point.y)
@@ -129,15 +134,15 @@ private fun buildGraphPaths(series: GraphSeries, now: Long, width: Float, height
             lastTimestamp = sample.timestamp
         }
     }
-    lastPoint?.let { fill.lineTo(it.x, height); fill.close() }
-    return GraphPaths(candidatePaths, active, fill, lastPoint, lastTimestamp)
+    finishSegment()
+    return GraphPaths(candidatePoints, segments, lastPoint, lastTimestamp)
 }
 
-private fun prepareGraphSeries(samples: List<TelemetrySample>, now: Long): GraphSeries {
+private fun prepareGraphSeries(samples: List<TelemetrySample>, now: Long, liveBssids: Set<String>): GraphSeries {
     val windowStart = now - 60_000L
     val visible = samples.filter { it.timestamp in windowStart..now }
     val candidates = visible.asSequence().flatMap { it.candidates.values.asSequence() }
-        .filter { it.observedAtMillis in windowStart..now }
+        .filter { it.observedAtMillis in windowStart..now && it.bssid.lowercase() in liveBssids }
         .groupBy { it.bssid.lowercase() }
         .toSortedMap()
         .map { (bssid, readings) ->
@@ -150,6 +155,7 @@ private fun prepareGraphSeries(samples: List<TelemetrySample>, now: Long): Graph
 fun WifiGraphView(
     state: TelemetryGraphState,
     ageClock: StateFlow<Long>,
+    scrollState: ScrollState,
     onTogglePause: () -> Unit,
     onClearHistory: () -> Unit,
     onSelectCandidate: (String?) -> Unit,
@@ -161,22 +167,21 @@ fun WifiGraphView(
     val textMeasurer = rememberTextMeasurer()
     val haptic = LocalHapticFeedback.current
     val gridLabelStyle = remember(palette) {
-        TextStyle(color = palette.textTertiary, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+        TextStyle(color = palette.textSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
     }
     val gridLabels = remember(textMeasurer, gridLabelStyle) {
         listOf("-40 dBm", "-50 dBm", "-65 [GOOD]", "-75 [ROAM]", "-90 dBm", "-60s", "-30s", "NOW")
             .associateWith { textMeasurer.measure(it, gridLabelStyle) }
     }
-    val graphSeries = remember(state.samples, state.nowTimestampMillis) {
-        prepareGraphSeries(state.samples, state.nowTimestampMillis)
+    val graphSeries = remember(state.samples, state.nowTimestampMillis, state.candidates) {
+        prepareGraphSeries(state.samples, state.nowTimestampMillis, state.candidates.map { it.bssid.lowercase() }.toSet())
     }
 
     CliPanel(
-        modifier = modifier
-            .fillMaxWidth()
-            .verticalScroll(rememberScrollState()),
+        modifier = modifier.fillMaxSize(),
         containerColor = CliSurface,
-        contentPadding = PaddingValues(16.dp)
+        contentPadding = PaddingValues(16.dp),
+        scrollState = scrollState
     ) {
         // ── 1. Header Bar: Title, Live Telemetry Status & Controls ──
         Row(
@@ -184,7 +189,10 @@ fun WifiGraphView(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(
+                modifier = Modifier.weight(1f).padding(end = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
                 Text(
                     text = "TACTICAL RF TELEMETRY",
                     style = CliTypography.TelemetryLabel
@@ -198,7 +206,9 @@ fun WifiGraphView(
                         "OFFLINE — WI-FI DISCONNECTED"
                     },
                     style = CliTypography.CodeMono,
-                    color = if (isConnected) CliTextSecondary else CliAccentRed
+                    color = if (isConnected) CliTextSecondary else CliAccentRed,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
                 ObservationAgeText(state, ageClock)
             }
@@ -211,7 +221,7 @@ fun WifiGraphView(
                 // Pause / Resume Icon Button
                 Surface(
                     modifier = Modifier
-                        .size(34.dp)
+                        .size(48.dp)
                         .clip(RoundedCornerShape(6.dp))
                         .border(
                             1.dp,
@@ -231,7 +241,7 @@ fun WifiGraphView(
                             imageVector = if (state.isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
                             contentDescription = if (state.isPaused) "Resume" else "Pause",
                             tint = if (state.isPaused) CliAccent24GHz else CliTextSecondary,
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                 }
@@ -239,7 +249,7 @@ fun WifiGraphView(
                 // Clear History Icon Button
                 Surface(
                     modifier = Modifier
-                        .size(34.dp)
+                        .size(48.dp)
                         .clip(RoundedCornerShape(6.dp))
                         .border(1.dp, CliBorder, RoundedCornerShape(6.dp))
                         .clickable {
@@ -255,7 +265,7 @@ fun WifiGraphView(
                             imageVector = Icons.Default.DeleteSweep,
                             contentDescription = "Clear History",
                             tint = CliTextSecondary,
-                            modifier = Modifier.size(17.dp)
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                 }
@@ -316,10 +326,11 @@ fun WifiGraphView(
                     )
                 } else if (state.samples.isNotEmpty()) {
                     CliBadge(
-                        text = "OPTIMAL AP",
-                        accentColor = CliAccentGreen,
-                        backgroundColor = CliAccentGreenBg,
-                        borderColor = CliAccentGreen.copy(alpha = 0.5f)
+                        text = if (state.candidates.none { it.isInLatestScan && isFreshCandidate(it.observedAtMillis, state.nowTimestampMillis) })
+                            "NO FRESH ALTERNATIVE" else "NO 6 dBm ADVANTAGE",
+                        accentColor = CliTextSecondary,
+                        backgroundColor = CliSurfaceElevated,
+                        borderColor = CliBorder
                     )
                 }
             }
@@ -377,7 +388,6 @@ fun WifiGraphView(
                                 series = graphSeries,
                                 paths = paths,
                                 nowTimestampMillis = state.nowTimestampMillis,
-                                activeBand = state.activeBand,
                                 selectedCandidateBssid = state.selectedCandidateBssid?.lowercase(),
                                 palette = palette,
                                 textMeasurer = textMeasurer,
@@ -387,6 +397,9 @@ fun WifiGraphView(
                     })
             }
         }
+
+        Spacer(modifier = Modifier.height(12.dp))
+        LinkSpeedHistory(graphSeries.visibleSamples, state.nowTimestampMillis, palette)
 
         Spacer(modifier = Modifier.height(16.dp))
 
@@ -406,6 +419,8 @@ fun WifiGraphView(
                     CandidateApCard(
                         candidate = candidate,
                         activeRssi = state.activeRssi,
+                        nowTimestampMillis = state.nowTimestampMillis,
+                        isPaused = state.isPaused,
                         isSelected = state.selectedCandidateBssid == candidate.bssid,
                         onSelect = {
                             if (state.selectedCandidateBssid == candidate.bssid) {
@@ -427,7 +442,7 @@ fun WifiGraphView(
                     .padding(12.dp)
             ) {
                 Text(
-                    text = "Single AP detected for this network. Roaming crossover monitoring will display once multiple BSSIDs (mesh or secondary bands) are in range.",
+                    text = "No recent same-network scan reading. Candidate points appear when another radio is measured.",
                     style = CliTypography.CodeMono,
                     color = CliTextTertiary
                 )
@@ -438,12 +453,61 @@ fun WifiGraphView(
 
 @Composable
 private fun ObservationAgeText(state: TelemetryGraphState, ageClock: StateFlow<Long>) {
-    val now by ageClock.collectAsState()
+    val liveNow by ageClock.collectAsState()
+    val now = if (state.isPaused) state.nowTimestampMillis else liveNow
     Text(
         text = observationAgeSummary(state, now),
         style = CliTypography.CodeMono,
         color = CliTextTertiary
     )
+}
+
+@Composable
+private fun LinkSpeedHistory(samples: List<TelemetrySample>, now: Long, palette: CliPalette) {
+    val readings = remember(samples, now) {
+        samples.filter { it.timestamp in (now - 60_000L)..now && it.activeLinkSpeedMbps > 0 }
+    }
+    val scaleMbps = maxOf(100, ((readings.maxOfOrNull { it.activeLinkSpeedMbps } ?: 0) / 100 + 1) * 100)
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(text = "PHY LINK SPEED · LAST 60s", style = CliTypography.TelemetryLabel)
+        Canvas(
+            modifier = Modifier.fillMaxWidth().height(100.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(CliBackground)
+                .border(1.dp, CliBorder, RoundedCornerShape(6.dp))
+                .padding(8.dp)
+        ) {
+            val baseline = size.height
+            drawLine(palette.borderSubtle, Offset(0f, baseline), Offset(size.width, baseline), 1f)
+            drawLine(palette.borderSubtle, Offset(0f, baseline / 2f), Offset(size.width, baseline / 2f), 1f)
+            val path = Path()
+            var previousTimestamp = 0L
+            readings.forEach { reading ->
+                val point = Offset(
+                    ((reading.timestamp - (now - 60_000L)).toFloat() / 60_000f).coerceIn(0f, 1f) * size.width,
+                    baseline * (1f - reading.activeLinkSpeedMbps.toFloat().coerceIn(0f, scaleMbps.toFloat()) / scaleMbps)
+                )
+                if (previousTimestamp == 0L || reading.timestamp - previousTimestamp > 7_500L) {
+                    path.moveTo(point.x, point.y)
+                } else {
+                    path.lineTo(point.x, point.y)
+                }
+                previousTimestamp = reading.timestamp
+            }
+            drawPath(path, color = palette.accent5GHz, style = Stroke(width = 2.5f, cap = StrokeCap.Round))
+            readings.lastOrNull()?.takeIf { now - it.timestamp in 0L..7_500L }?.let { last ->
+                drawCircle(
+                    color = palette.accent5GHz,
+                    radius = 4f,
+                    center = Offset(
+                        ((last.timestamp - (now - 60_000L)).toFloat() / 60_000f).coerceIn(0f, 1f) * size.width,
+                        baseline * (1f - last.activeLinkSpeedMbps.toFloat().coerceIn(0f, scaleMbps.toFloat()) / scaleMbps)
+                    )
+                )
+            }
+        }
+        Text(text = "0–$scaleMbps Mbps · PHY rate, not internet throughput", style = CliTypography.CodeMono, color = CliTextTertiary)
+    }
 }
 
 private fun observationAgeSummary(state: TelemetryGraphState, now: Long): String {
@@ -464,7 +528,6 @@ private fun DrawScope.drawTelemetryGraph(
     series: GraphSeries,
     paths: GraphPaths,
     nowTimestampMillis: Long,
-    activeBand: BandType,
     selectedCandidateBssid: String?,
     palette: CliPalette,
     textMeasurer: TextMeasurer,
@@ -539,22 +602,16 @@ private fun DrawScope.drawTelemetryGraph(
         drawText(textLayoutResult = measured, topLeft = Offset(6f, y - measured.size.height - 2f))
     }
 
-    // 3. Draw Candidate AP Lines (Background/Secondary)
+    // Scan readings are discrete observations; drawing a line would imply continuous RF data.
     series.candidates.forEachIndexed { candIndex, (candidateKey, _) ->
         val candBssid = candidateKey
         val isHighlighted = selectedCandidateBssid == null || selectedCandidateBssid == candBssid
-        val candColor = candidateColor(candIndex, palette)
-        val alpha = if (isHighlighted) 0.65f else 0.15f
-        val strokeWidth = if (selectedCandidateBssid == candBssid) 2.5f else 1.5f
-
-        drawPath(
-            path = paths.candidatePaths[candIndex],
-            color = candColor.copy(alpha = alpha),
-            style = Stroke(
-                width = strokeWidth,
-                pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f))
-            )
-        )
+        val candColor = candidateColor(com.quintz.wifi.telemetry.candidateColorIndex(candBssid), palette)
+        paths.candidatePoints[candIndex].forEach { point ->
+            drawCircle(candColor.copy(alpha = if (isHighlighted) 0.85f else 0.2f),
+                radius = if (selectedCandidateBssid == candBssid) 4.5f else 3.5f,
+                center = point)
+        }
     }
 
     // 4. Draw Roam Event Vertical Markers
@@ -570,7 +627,7 @@ private fun DrawScope.drawTelemetryGraph(
             )
 
             val tag = "ROAM [${roam.fromBand.displayName} → ${roam.toBand.displayName}]"
-            val style = TextStyle(color = palette.accent5GHz, fontSize = 8.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+            val style = TextStyle(color = palette.accent5GHz, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
             val measuredTag = textMeasurer.measure(tag, style)
             drawText(
                 textLayoutResult = measuredTag,
@@ -579,18 +636,13 @@ private fun DrawScope.drawTelemetryGraph(
         }
     }
 
-    // 5. Draw Active AP Primary Curve & Gradient Fill
-    val activeColor = if (activeBand == BandType.BAND_5_GHZ || activeBand == BandType.BAND_6_GHZ) {
-        palette.accent5GHz
-    } else {
-        palette.accent24GHz
-    }
-
-    if (paths.lastPoint != null) {
-
-        // Subtle glowing gradient fill under curve
+    // 5. Color each connection segment by its measured band.
+    paths.activeSegments.forEach { segment ->
+        val activeColor = if (segment.band == BandType.BAND_5_GHZ || segment.band == BandType.BAND_6_GHZ) {
+            palette.accent5GHz
+        } else palette.accent24GHz
         drawPath(
-            path = paths.fillPath,
+            path = segment.fill,
             brush = Brush.verticalGradient(
                 colors = listOf(activeColor.copy(alpha = 0.22f), activeColor.copy(alpha = 0.02f)),
                 startY = dbmToY(-40f),
@@ -600,13 +652,15 @@ private fun DrawScope.drawTelemetryGraph(
 
         // Bold active line
         drawPath(
-            path = paths.activePath,
+            path = segment.line,
             color = activeColor,
             style = Stroke(width = 3.2f, cap = StrokeCap.Round, join = StrokeJoin.Round)
         )
 
-        // Show a live marker only while the last measurement is recent.
-        if (nowTimestampMillis - paths.lastStatusTimestamp in 0L..7_500L) {
+    }
+    if (paths.lastPoint != null && nowTimestampMillis - paths.lastStatusTimestamp in 0L..7_500L) {
+        val lastBand = series.visibleSamples.lastOrNull()?.activeBand
+        val activeColor = if (lastBand == BandType.BAND_5_GHZ || lastBand == BandType.BAND_6_GHZ) palette.accent5GHz else palette.accent24GHz
             drawCircle(
                 color = activeColor,
                 radius = 5.5f,
@@ -617,7 +671,6 @@ private fun DrawScope.drawTelemetryGraph(
                 radius = 2.5f,
                 center = paths.lastPoint
             )
-        }
     }
 
     // 6. Draw Bottom Time Labels (e.g. -60s, -30s, NOW)
@@ -637,11 +690,14 @@ private fun DrawScope.drawTelemetryGraph(
 private fun CandidateApCard(
     candidate: CandidateMeta,
     activeRssi: Int,
+    nowTimestampMillis: Long,
+    isPaused: Boolean,
     isSelected: Boolean,
     onSelect: () -> Unit,
     onLock: () -> Unit
 ) {
     val delta = candidate.latestRssi - activeRssi
+    val isFresh = candidate.isInLatestScan && isFreshCandidate(candidate.observedAtMillis, nowTimestampMillis)
     val candColor = candidateColor(candidate.colorIndex, LocalCliPalette.current)
 
     val deltaText = if (delta > 0) "+$delta dBm" else "$delta dBm"
@@ -692,9 +748,10 @@ private fun CandidateApCard(
                 }
 
                 Text(
-                    text = "Signal: ${candidate.latestRssi} dBm (Advantage: $deltaText) · measured ${((System.currentTimeMillis() - candidate.observedAtMillis).coerceAtLeast(0L) / 1000L)}s ago",
+                    text = "Signal: ${candidate.latestRssi} dBm · measured ${((nowTimestampMillis - candidate.observedAtMillis).coerceAtLeast(0L) / 1000L)}s ago" +
+                        if (isFresh) " · advantage $deltaText" else " · STALE SCAN",
                     style = CliTypography.CodeMono,
-                    color = deltaColor
+                    color = if (isFresh) deltaColor else CliTextTertiary
                 )
             }
         }
@@ -702,7 +759,8 @@ private fun CandidateApCard(
         // Lock button
         CliButton(
             onClick = onLock,
-            text = "LOCK",
+            text = if (isPaused) "PAUSED" else if (isFresh) "LOCK" else "STALE",
+            enabled = !isPaused && isFresh,
             variant = if (delta >= 6) CliButtonVariant.Primary else CliButtonVariant.Outlined,
             leadingIcon = {
                 Icon(

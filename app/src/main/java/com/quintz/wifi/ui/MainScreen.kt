@@ -6,6 +6,10 @@ import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.draw.rotate
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -14,6 +18,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -27,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -72,7 +78,11 @@ enum class PhoneTab {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainScreen(viewModel: MainViewModel) {
+fun MainScreen(
+    viewModel: MainViewModel,
+    isDarkTheme: Boolean = LocalCliPalette.current == DarkCliPalette,
+    onToggleTheme: () -> Unit = { viewModel.toggleTheme(isDarkTheme) }
+) {
     val context = LocalContext.current
     val shizukuState by viewModel.shizukuState.collectAsState()
     val wifiStatus by viewModel.wifiStatus.collectAsState()
@@ -220,6 +230,7 @@ fun MainScreen(viewModel: MainViewModel) {
     var selectedFilter by rememberSaveable { mutableStateOf(RadioFilter.ALL) }
     var selectedRightPane by rememberSaveable { mutableStateOf(RightPaneView.SCANNER) }
     var selectedPhoneTab by rememberSaveable { mutableStateOf(PhoneTab.CONTROLS) }
+    val graphScrollState = rememberScrollState()
 
     // RF Telemetry Graph State from ViewModel
 
@@ -300,7 +311,7 @@ fun MainScreen(viewModel: MainViewModel) {
                         )
                     }
 
-                    // Right: Tactile Shizuku Status Badge & Optional Debug Diagnostics
+                    // Right: Tactile Shizuku Status Badge, Theme Toggle & Optional Debug Diagnostics
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -338,6 +349,40 @@ fun MainScreen(viewModel: MainViewModel) {
                                 )
                             }
                         }
+
+                        // Industrial Contrast Theme Toggle (Light / Dark)
+                        val haptic = LocalHapticFeedback.current
+                        val contrastRotation by animateFloatAsState(
+                            targetValue = if (isDarkTheme) 0f else 180f,
+                            animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
+                            label = "theme_contrast_rotation"
+                        )
+                        Surface(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .border(1.dp, CliBorder, RoundedCornerShape(6.dp))
+                                .clickable {
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    onToggleTheme()
+                                },
+                            shape = RoundedCornerShape(6.dp),
+                            color = CliSurfaceElevated
+                        ) {
+                            Box(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 7.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Contrast,
+                                    contentDescription = if (isDarkTheme) "Switch to light mode" else "Switch to dark mode",
+                                    tint = if (isDarkTheme) CliAccent24GHz else CliTextPrimary,
+                                    modifier = Modifier
+                                        .size(13.dp)
+                                        .rotate(contrastRotation)
+                                )
+                            }
+                        }
+
                         if (BuildConfig.DEBUG) {
                             Surface(
                                 modifier = Modifier
@@ -522,7 +567,11 @@ fun MainScreen(viewModel: MainViewModel) {
 
                         Spacer(modifier = Modifier.height(10.dp))
 
-                        Crossfade(targetState = selectedRightPane, label = "rightPaneCrossfade") { pane ->
+                        Crossfade(
+                            targetState = selectedRightPane,
+                            modifier = Modifier.weight(1f),
+                            label = "rightPaneCrossfade"
+                        ) { pane ->
                             when (pane) {
                                 RightPaneView.SCANNER -> {
                                     if (filteredRadios.isEmpty()) {
@@ -571,6 +620,7 @@ fun MainScreen(viewModel: MainViewModel) {
                                 RightPaneView.GRAPH -> {
                                     GraphPane(
                                         viewModel = viewModel,
+                                        scrollState = graphScrollState,
                                         isConnected = wifiStatus.isConnected,
                                         onLockBssid = { bssid ->
                                             val radio = radios.find { it.bssid.equals(bssid, ignoreCase = true) }
@@ -652,7 +702,11 @@ fun MainScreen(viewModel: MainViewModel) {
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    Crossfade(targetState = selectedPhoneTab, label = "tabCrossfade") { tab ->
+                    Crossfade(
+                        targetState = selectedPhoneTab,
+                        modifier = Modifier.weight(1f),
+                        label = "tabCrossfade"
+                    ) { tab ->
                         when (tab) {
                             PhoneTab.CONTROLS -> {
                                 Column(
@@ -796,6 +850,7 @@ fun MainScreen(viewModel: MainViewModel) {
                             PhoneTab.GRAPH -> {
                                 GraphPane(
                                     viewModel = viewModel,
+                                    scrollState = graphScrollState,
                                     isConnected = wifiStatus.isConnected,
                                     onLockBssid = { bssid ->
                                         val radio = radios.find { it.bssid.equals(bssid, ignoreCase = true) }
@@ -1186,6 +1241,7 @@ fun MainScreen(viewModel: MainViewModel) {
 @Composable
 private fun GraphPane(
     viewModel: MainViewModel,
+    scrollState: ScrollState,
     isConnected: Boolean,
     onLockBssid: (String) -> Unit
 ) {
@@ -1194,10 +1250,11 @@ private fun GraphPane(
     WifiGraphView(
         state = telemetryState,
         ageClock = viewModel.telemetryClock,
+        scrollState = scrollState,
         onTogglePause = { viewModel.togglePauseTelemetry() },
         onClearHistory = { viewModel.clearTelemetryHistory() },
         onSelectCandidate = { viewModel.selectCandidateBssid(it) },
         onLockBssid = onLockBssid,
-        isConnected = isConnected
+        isConnected = if (telemetryState.isPaused) telemetryState.isConnected else isConnected
     )
 }

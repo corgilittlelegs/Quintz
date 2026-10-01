@@ -152,6 +152,16 @@ class Preferences private constructor(context: Context) {
         }
         set(value) = prefs.edit().putString("default_mac_policy", value.name).apply()
 
+    var isDarkMode: Boolean?
+        get() = if (prefs.contains("dark_mode")) prefs.getBoolean("dark_mode", true) else null
+        set(value) {
+            if (value == null) {
+                prefs.edit().remove("dark_mode").apply()
+            } else {
+                prefs.edit().putBoolean("dark_mode", value).apply()
+            }
+        }
+
     var isWatchdogEnabled: Boolean
         get() = prefs.getBoolean("watchdog_enabled", false)
         set(value) = prefs.edit().putBoolean("watchdog_enabled", value).apply()

@@ -49,8 +49,8 @@ Quintz leverages the **[Shizuku](https://shizuku.rikka.app)** privileged API bri
   - **Why the Watchdog Helps**: Because no user-space application can completely override kernel/firmware roaming decisions, Quintz's Watchdog detects when the active connection is on 2.4 GHz and attempts a verified transition to a strong same-network 5 GHz / 6 GHz BSSID when RF conditions permit. It then restores the unpinned profile so normal roaming can continue.
 
 ### 📊 Real-Time Roaming & RF Telemetry Monitor
-- Real-time rolling oscilloscope canvas tracking active connection RSSI and PHY link speed over time.
-- **Multi-AP Roaming Crossover Detection**: Plots candidate BSSIDs under the same network simultaneously to visually expose sticky client behavior and highlight optimal handoff opportunities.
+- Rolling graphs for active connection RSSI and PHY link speed over the last minute.
+- **Multi-AP Roaming Crossover Detection**: Plots recent same-network candidate scan readings as discrete points, and marks readings too old for a live comparison as stale.
 - **Color-Coded RF Quality Bands**: Visual thresholds for Optimal (`> -65 dBm`), Evaluation (`-65 to -75 dBm`), and Roam / Weak (`< -75 dBm`) zones.
 - **Automated Handoff Event Tracking**: Drops timestamped event pins whenever band or BSSID transitions take place.
 - **Interactive AP Legend**: Instant 1-tap BSSID locking directly from the telemetry monitor.

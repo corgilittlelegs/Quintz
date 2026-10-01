@@ -100,3 +100,4 @@ val CliAccentRed: Color @Composable get() = LocalCliPalette.current.accentRed
 val CliAccentRedBg: Color @Composable get() = LocalCliPalette.current.accentRedBg
 val CliButtonPrimary: Color @Composable get() = LocalCliPalette.current.buttonPrimary
 val CliButtonPrimaryText: Color @Composable get() = LocalCliPalette.current.buttonPrimaryText
+val CliIsDark: Boolean @Composable get() = LocalCliPalette.current == DarkCliPalette

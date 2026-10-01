@@ -10,6 +10,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.core.view.WindowCompat
 import com.quintz.wifi.shizuku.ShizukuManager
 import com.quintz.wifi.ui.theme.AppTheme
@@ -33,7 +35,10 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            val darkTheme = isSystemInDarkTheme()
+            val userDarkMode by viewModel.isDarkMode.collectAsState()
+            val systemDark = isSystemInDarkTheme()
+            val darkTheme = userDarkMode ?: systemDark
+
             SideEffect {
                 WindowCompat.getInsetsController(window, window.decorView).apply {
                     isAppearanceLightStatusBars = !darkTheme
@@ -41,7 +46,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
             AppTheme(darkTheme = darkTheme) {
-                MainScreen(viewModel = viewModel)
+                MainScreen(
+                    viewModel = viewModel,
+                    isDarkTheme = darkTheme,
+                    onToggleTheme = { viewModel.toggleTheme(darkTheme) }
+                )
             }
         }
     }

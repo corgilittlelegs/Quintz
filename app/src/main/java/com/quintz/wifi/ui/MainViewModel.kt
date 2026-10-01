@@ -53,6 +53,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val maxTelemetrySamples = 60
     private val telemetryBuffer = ArrayDeque<TelemetrySample>()
+    private val candidateHistory = mutableMapOf<String, CandidateSample>()
+    private var previousSsid = ""
     private var previousBssid = ""
     private var previousBand = BandType.UNKNOWN
     private var lastRecordedStatusObservationMillis = 0L
@@ -81,6 +83,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isTileAdded = MutableStateFlow(prefs.isQuickTileAdded)
     val isTileAdded: StateFlow<Boolean> = _isTileAdded.asStateFlow()
+
+    private val _isDarkMode = MutableStateFlow(prefs.isDarkMode)
+    val isDarkMode: StateFlow<Boolean?> = _isDarkMode.asStateFlow()
+
+    fun toggleTheme(currentIsDark: Boolean) {
+        val nextMode = !currentIsDark
+        _isDarkMode.value = nextMode
+        prefs.isDarkMode = nextMode
+    }
+
+    fun setDarkMode(dark: Boolean?) {
+        _isDarkMode.value = dark
+        prefs.isDarkMode = dark
+    }
 
     private val connectivityManager = application.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
     private var pollingJob: Job? = null
@@ -217,17 +233,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun startTelemetryPolling() {
         if (telemetryJob?.isActive == true) return
         telemetryJob = viewModelScope.launch {
-            var lastGraphRefreshMillis = 0L
             while (isActive) {
                 if (isForeground) {
-                    val now = System.currentTimeMillis()
-                    _telemetryClock.value = now
-                    if (now - lastGraphRefreshMillis >= 5_000L) {
-                        recordTelemetrySample()
-                        lastGraphRefreshMillis = now
-                    }
+                    _telemetryClock.value = System.currentTimeMillis()
+                    recordTelemetrySample()
                 }
-                delay(5000)
+                delay(1000)
             }
         }
     }
@@ -265,33 +276,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun togglePauseTelemetry() {
+        val paused = !_telemetryState.value.isPaused
         _telemetryState.value = _telemetryState.value.copy(
-            isPaused = !_telemetryState.value.isPaused
+            isPaused = paused,
+            nowTimestampMillis = if (paused) System.currentTimeMillis() else _telemetryState.value.nowTimestampMillis
         )
+        if (!paused) recordTelemetrySample()
     }
 
     fun clearTelemetryHistory() {
         synchronized(telemetryBuffer) {
             telemetryBuffer.clear()
         }
+        candidateHistory.clear()
+        lastRecordedStatusObservationMillis = 0L
         _telemetryState.value = _telemetryState.value.copy(
             samples = emptyList(),
             minRssi = _telemetryState.value.activeRssi,
-            maxRssi = _telemetryState.value.activeRssi
+            maxRssi = _telemetryState.value.activeRssi,
+            candidates = emptyList(),
+            bestCandidateBssid = null,
+            roamAdvantageDbm = 0,
+            selectedCandidateBssid = null
         )
     }
 
     fun selectCandidateBssid(bssid: String?) {
+        if (_telemetryState.value.isPaused) return
         _telemetryState.value = _telemetryState.value.copy(
             selectedCandidateBssid = bssid
         )
     }
 
     fun recordTelemetrySample() {
+        if (_telemetryState.value.isPaused) return
         val status = controller.status.value
         val now = System.currentTimeMillis()
         val scanTimestamp = controller.lastScanCompletedTimestamp
         val baseState = _telemetryState.value.copy(
+            isConnected = status.isConnected,
             nowTimestampMillis = now,
             lastStatusObservedAtMillis = status.observedAtMillis,
             lastScanAttemptedAtMillis = controller.lastScanAttemptTimestamp,
@@ -302,7 +325,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         if (!status.isConnected) {
             synchronized(telemetryBuffer) { telemetryBuffer.clear() }
+            candidateHistory.clear()
             lastRecordedStatusObservationMillis = 0L
+            previousSsid = ""
             previousBssid = ""
             previousBand = BandType.UNKNOWN
             _telemetryState.value = baseState.copy(
@@ -312,22 +337,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 activeRssi = 0,
                 activeLinkSpeedMbps = 0,
                 activeBand = BandType.UNKNOWN,
-                candidates = emptyList()
+                minRssi = 0,
+                maxRssi = 0,
+                candidates = emptyList(),
+                bestCandidateBssid = null,
+                roamAdvantageDbm = 0,
+                selectedCandidateBssid = null
             )
             return
         }
+        val networkChanged = previousSsid.isNotEmpty() && status.ssid.isNotEmpty() && previousSsid != status.ssid
+        if (networkChanged) {
+            synchronized(telemetryBuffer) { telemetryBuffer.clear() }
+            candidateHistory.clear()
+            lastRecordedStatusObservationMillis = 0L
+            previousBssid = ""
+            previousBand = BandType.UNKNOWN
+        }
+        if (status.ssid.isNotEmpty()) previousSsid = status.ssid
         if (status.rssi == 0 || status.rssi <= -127) {
             if (status.bssid.isNotEmpty()) {
                 previousBssid = status.bssid
                 previousBand = status.band
             }
-            _telemetryState.value = if (baseState.activeBssid.isNotEmpty()) {
+            _telemetryState.value = if (baseState.activeBssid.isNotEmpty() || networkChanged) {
                 baseState.copy(
+                    samples = if (networkChanged) emptyList() else baseState.samples,
                     activeBssid = "",
                     activeSsid = "",
                     activeRssi = 0,
                     activeLinkSpeedMbps = 0,
-                    activeBand = BandType.UNKNOWN
+                    activeBand = BandType.UNKNOWN,
+                    minRssi = 0,
+                    maxRssi = 0,
+                    candidates = emptyList(),
+                    bestCandidateBssid = null,
+                    roamAdvantageDbm = 0,
+                    selectedCandidateBssid = null
                 )
             } else baseState
             return
@@ -338,11 +384,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val apList = controller.radios.value
         val candidatesMap = mutableMapOf<String, CandidateSample>()
         apList.filter {
-            it.bssid.lowercase() != currentBssid &&
-                (it.ssid.isEmpty() || it.ssid == currentSsid || currentSsid.isEmpty()) &&
-                it.observedAtMillis > 0L && now - it.observedAtMillis in 0L..20_000L
+            currentBssid.isNotEmpty() && it.bssid.lowercase() != currentBssid &&
+                currentSsid.isNotEmpty() && it.ssid == currentSsid &&
+                isVisibleCandidate(it.observedAtMillis, now)
         }.forEach { ap ->
-            candidatesMap[ap.bssid.lowercase()] = CandidateSample(
+            val candidate = CandidateSample(
                 bssid = ap.bssid,
                 ssid = ap.ssid,
                 rssi = ap.rssi,
@@ -350,29 +396,62 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 band = ap.band,
                 observedAtMillis = ap.observedAtMillis
             )
+            val key = ap.bssid.lowercase()
+            candidatesMap[key] = candidate
+            if (candidate.observedAtMillis >= (candidateHistory[key]?.observedAtMillis ?: 0L)) {
+                candidateHistory[key] = candidate
+            }
         }
-        val candidateMetas = candidatesMap.values.sortedBy { it.bssid }.mapIndexed { idx, cand ->
+        candidateHistory.entries.removeAll { (bssid, candidate) ->
+            bssid == currentBssid || !isVisibleCandidate(candidate.observedAtMillis, now)
+        }
+        val candidateMetas = candidateHistory.values.sortedBy { it.bssid }.map { cand ->
             CandidateMeta(
                 bssid = cand.bssid,
                 ssid = cand.ssid,
                 channel = cand.channel,
                 band = cand.band,
                 latestRssi = cand.rssi,
-                colorIndex = idx,
+                colorIndex = candidateColorIndex(cand.bssid),
+                isInLatestScan = candidatesMap.containsKey(cand.bssid.lowercase()),
                 observedAtMillis = cand.observedAtMillis
             )
         }.sortedByDescending { it.latestRssi }
-        if (baseState.isPaused || status.observedAtMillis <= 0L ||
+        val bestCandidate = candidateMetas.filter { it.isInLatestScan && isFreshCandidate(it.observedAtMillis, now) }
+            .maxByOrNull { it.latestRssi }
+        val roamAdvantage = if (bestCandidate != null && bestCandidate.latestRssi > status.rssi) {
+            bestCandidate.latestRssi - status.rssi
+        } else 0
+        val selectedCandidate = baseState.selectedCandidateBssid?.takeIf { selected ->
+            candidateMetas.any { it.bssid.equals(selected, ignoreCase = true) }
+        }
+        if (status.observedAtMillis <= 0L ||
             status.observedAtMillis <= lastRecordedStatusObservationMillis
         ) {
-            _telemetryState.value = baseState.copy(candidates = candidateMetas)
+            val samples = synchronized(telemetryBuffer) {
+                while (telemetryBuffer.isNotEmpty() && telemetryBuffer.first().timestamp < now - 60_000L) {
+                    telemetryBuffer.removeFirst()
+                }
+                telemetryBuffer.toList()
+            }
+            val rssiValues = samples.map { it.activeRssi }.filter { it in -120..-10 }
+            _telemetryState.value = baseState.copy(
+                samples = samples,
+                minRssi = rssiValues.minOrNull() ?: status.rssi,
+                maxRssi = rssiValues.maxOrNull() ?: status.rssi,
+                candidates = candidateMetas,
+                selectedCandidateBssid = selectedCandidate,
+                bestCandidateBssid = if (roamAdvantage > 0) bestCandidate?.bssid else null,
+                roamAdvantageDbm = roamAdvantage
+            )
             return
         }
         lastRecordedStatusObservationMillis = status.observedAtMillis
 
         // Detect Roam Event
         var roamEvent: RoamEvent? = null
-        if (previousBssid.isNotEmpty() && status.bssid.isNotEmpty() && previousBssid.lowercase() != status.bssid.lowercase()) {
+        if (previousBssid.isNotEmpty() && status.bssid.isNotEmpty() &&
+            (previousBssid.lowercase() != status.bssid.lowercase() || previousBand != status.band)) {
             roamEvent = RoamEvent(
                 timestamp = status.observedAtMillis,
                 fromBssid = previousBssid,
@@ -408,11 +487,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val minRssi = rssiValues.minOrNull() ?: status.rssi
         val maxRssi = rssiValues.maxOrNull() ?: status.rssi
 
-        val bestCandidate = candidateMetas.firstOrNull { now - it.observedAtMillis <= 8_000L }
-        val roamAdvantage = if (bestCandidate != null && bestCandidate.latestRssi > status.rssi) {
-            bestCandidate.latestRssi - status.rssi
-        } else 0
-
         _telemetryState.value = baseState.copy(
             samples = sampleList,
             activeBssid = status.bssid,
@@ -423,6 +497,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             minRssi = minRssi,
             maxRssi = maxRssi,
             candidates = candidateMetas,
+            selectedCandidateBssid = selectedCandidate,
             bestCandidateBssid = if (roamAdvantage > 0) bestCandidate?.bssid else null,
             roamAdvantageDbm = roamAdvantage
         )
