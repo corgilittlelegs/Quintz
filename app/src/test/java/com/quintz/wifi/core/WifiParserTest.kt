@@ -83,6 +83,22 @@ class WifiParserTest {
     }
 
     @Test
+    fun testParseScanResults_skipsUnnamedRadioInsteadOfDisplayingSecurityFlags() {
+        val scanOutput = """
+            BSSID              Frequency      RSSI           Age(sec)     SSID                                 Flags
+            32:de:4b:21:55:2e       2457    -50(0:-50)           13.803                                      [WPA2-PSK-CCMP-128][RSN-PSK-CCMP-128][ESS]
+            30:de:4b:31:55:2e       2457    -50(0:-50)           13.808    Archer                            [WPA2-PSK-CCMP-128][RSN-PSK+SAE-CCMP-128][ESS][MFPC]
+        """.trimIndent()
+
+        val results = WifiParser.parseScanResults(scanOutput, "Archer", "30:de:4b:31:55:2e")
+
+        assertEquals(1, results.size)
+        assertEquals("Archer", results.single().ssid)
+        assertEquals("30:de:4b:31:55:2e", results.single().bssid)
+        assertEquals("[WPA2-PSK-CCMP-128][RSN-PSK+SAE-CCMP-128][ESS][MFPC]", results.single().flags)
+    }
+
+    @Test
     fun testParseScanResults_rejectsStaleResults() {
         val scanOutput = """
             BSSID              Frequency      RSSI           Age(sec)     SSID        Flags

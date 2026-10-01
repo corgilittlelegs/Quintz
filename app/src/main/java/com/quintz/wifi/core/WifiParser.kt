@@ -15,7 +15,7 @@ object WifiParser {
     private val IP_REGEX = Regex("""IP:\s*/?([0-9.]+)""")
     private val SEC_TYPE_REGEX = Regex("""Security type:\s*(\d+)""")
     private val NET_ID_REGEX = Regex("""Net ID:\s*(\d+)""")
-    private val SCAN_FLAGS_SUFFIX_REGEX = Regex("""\s+((?:\[[^\]]+\])+)$""")
+    private val SCAN_FLAGS_SUFFIX_REGEX = Regex("""(?:^|\s+)((?:\[[^\]]+\])+)$""")
 
     /** Reads identity fields from dumpsys output even when it omits connection-state markers. */
     fun parseConnectionIdentity(output: String): Pair<String, String> {
@@ -148,8 +148,8 @@ object WifiParser {
                 // Reconstruct SSID and Flags
                 val rest = trimmed.substringAfter(parts[2]).trim()
                 val afterAge = if (parts.size > 4) rest.substringAfter(parts[3]).trim() else ""
-                // Flags are the final, contiguous bracket groups. Earlier brackets can be
-                // part of the SSID (for example "Office [5G] [WPA2-PSK-CCMP][ESS]").
+                // Flags are the final, contiguous bracket groups, including when the SSID
+                // column is empty. Earlier brackets can be part of a named SSID.
                 val flagsMatch = SCAN_FLAGS_SUFFIX_REGEX.find(afterAge)
                 val flags = flagsMatch?.groupValues?.get(1).orEmpty()
                 val ssid = if (flagsMatch == null) afterAge else afterAge.substring(0, flagsMatch.range.first).trim()

@@ -118,8 +118,15 @@ class TileService : android.service.quicksettings.TileService() {
                         correlationId = correlationId
                     )
                     DiagnosticLogger.log("USER_ACTION", "id=$correlationId source=quick_settings_tile result=${if (success) "success" else "failure"} action=unlock_to_auto")
+                    val watchdogStopped = success && WatchdogControl.stopIfNoTargets(this@TileService, prefs)
                     withContext(Dispatchers.Main) {
-                        Toast.makeText(this@TileService, if (success) "Quintz: Auto-Roam active" else "Quintz: Could not verify Auto-Roam; try again in the app", Toast.LENGTH_LONG).show()
+                        val message = when {
+                            !success -> "Quintz: Could not verify Auto-Roam; try again in the app"
+                            watchdogStopped -> "Quintz: Auto-Roam active; Watchdog stopped"
+                            prefs.isWatchdogEnabled -> "Quintz: Auto-Roam active; Watchdog kept for other networks"
+                            else -> "Quintz: Auto-Roam active"
+                        }
+                        Toast.makeText(this@TileService, message, Toast.LENGTH_LONG).show()
                     }
                 } else {
                     // Auto mode -> Prefer 5 GHz
@@ -148,9 +155,13 @@ class TileService : android.service.quicksettings.TileService() {
                             correlationId = correlationId
                         )
                         DiagnosticLogger.log("USER_ACTION", "id=$correlationId source=quick_settings_tile result=${if (success) "success" else "failure"} action=prefer_5ghz")
+                        val watchdogStarted = success && WatchdogControl.start(this@TileService, prefs)
                         withContext(Dispatchers.Main) {
                             if (success) {
-                                Toast.makeText(this@TileService, "Quintz: Preferred 5 GHz active (Roam Allowed)", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(this@TileService,
+                                    if (watchdogStarted) "Quintz: Preferred 5 GHz active; Watchdog starting"
+                                    else "Quintz: Preferred 5 GHz active; Watchdog could not start",
+                                    Toast.LENGTH_SHORT).show()
                             } else {
                                 val message = if (controller.lastPasswordStorageFailure) {
                                     "Quintz: Secure password storage is unavailable. Unlock the device and retry in the app"

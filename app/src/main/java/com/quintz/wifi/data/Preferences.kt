@@ -156,6 +156,9 @@ class Preferences private constructor(context: Context) {
         get() = prefs.getBoolean("watchdog_enabled", false)
         set(value) = prefs.edit().putBoolean("watchdog_enabled", value).apply()
 
+    /** Conservatively retain the watchdog if saved targets cannot be read. */
+    fun hasWatchdogTargets(): Boolean = runCatching { hasWatchdogTargets(prefs.all) }.getOrDefault(true)
+
     var batteryOptimizationPromptShown: Boolean
         get() = prefs.getBoolean("battery_optimization_prompt_shown", false)
         set(value) = prefs.edit().putBoolean("battery_optimization_prompt_shown", value).apply()

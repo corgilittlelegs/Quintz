@@ -38,6 +38,8 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 class WatchdogService : Service() {
 
@@ -240,6 +242,7 @@ class WatchdogService : Service() {
         }
 
         startWatchdogLoop()
+        _isRunning.value = true
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -290,6 +293,11 @@ class WatchdogService : Service() {
                                 status.ssid,
                                 status.lockedBssid.takeIf { status.isLockedToBssid }
                             )
+                            if (!prefs.hasWatchdogTargets()) {
+                                DiagnosticLogger.log("WATCHDOG", "result=stopping reason=no_saved_steering_targets")
+                                WatchdogControl.stop(this@WatchdogService, prefs)
+                                break
+                            }
                             lastKnownSsid = status.ssid
                             prefs.watchdogLastSsid = status.ssid
                             prefs.rememberConnectedSecurity(status.ssid, status.securityType)
@@ -515,6 +523,7 @@ class WatchdogService : Service() {
     }
 
     override fun onDestroy() {
+        _isRunning.value = false
         DiagnosticLogger.watchdogServiceStopped()
         try {
             connectivityManager?.unregisterNetworkCallback(networkCallback)
@@ -563,5 +572,7 @@ class WatchdogService : Service() {
     companion object {
         private const val CHANNEL_ID = "watchdog_channel"
         private const val NOTIFICATION_ID = 4001
+        private val _isRunning = MutableStateFlow(false)
+        val isRunning = _isRunning.asStateFlow()
     }
 }

@@ -23,6 +23,7 @@ import com.quintz.wifi.model.ShizukuState
 import com.quintz.wifi.model.WifiStatus
 import com.quintz.wifi.service.TileService
 import com.quintz.wifi.service.TileStateTracker
+import com.quintz.wifi.service.WatchdogControl
 import com.quintz.wifi.service.WatchdogService
 import com.quintz.wifi.shizuku.ShizukuManager
 import com.quintz.wifi.telemetry.*
@@ -71,8 +72,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         messageChannel.trySend(message)
     }
 
-    private val _watchdogActive = MutableStateFlow(prefs.isWatchdogEnabled)
-    val watchdogActive: StateFlow<Boolean> = _watchdogActive.asStateFlow()
+    val watchdogActive: StateFlow<Boolean> = WatchdogService.isRunning
 
     private val _batteryOptimizationExempt = MutableStateFlow<Boolean?>(null)
     val batteryOptimizationExempt: StateFlow<Boolean?> = _batteryOptimizationExempt.asStateFlow()
@@ -658,43 +658,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
             val success = controller.unlockToAuto(status.ssid, requestSource = requestSource, correlationId = correlationId)
             DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId source=$requestSource result=${if (success) "success" else "failure"} action=unlock_to_auto")
-            refreshAll()
             if (success) {
-                postMessage("Reverted to Auto-Roam mode")
+                val stopped = WatchdogControl.stopIfNoTargets(getApplication(), prefs)
+                postMessage(when {
+                    stopped -> "Auto-Roam active; Watchdog stopped"
+                    prefs.isWatchdogEnabled -> "Auto-Roam active; Watchdog kept for other saved networks"
+                    else -> "Auto-Roam active"
+                })
             } else {
                 postMessage("Failed to unlock to Auto")
             }
+            refreshAll()
         }
     }
 
     fun toggleWatchdog(enabled: Boolean): Boolean {
         val context = getApplication<Application>()
-        val intent = Intent(context, WatchdogService::class.java)
         if (enabled) {
-            prefs.isWatchdogEnabled = true
-            return try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(intent)
-                } else {
-                    context.startService(intent)
-                }
-                _watchdogActive.value = true
+            val started = WatchdogControl.start(context, prefs)
+            if (started) {
                 refreshBatteryOptimizationStatus()
-                DiagnosticLogger.log("WATCHDOG", "result=started source=preferred_5ghz")
-                postMessage("Watchdog on; each network follows its saved mode")
-                true
-            } catch (e: Exception) {
-                prefs.isWatchdogEnabled = false
-                _watchdogActive.value = false
-                DiagnosticLogger.log("WATCHDOG", "result=failed reason=${e.javaClass.simpleName}")
+                DiagnosticLogger.log("WATCHDOG", "result=start_requested source=preferred_5ghz")
+                postMessage("Watchdog starting; each network follows its saved mode")
+            } else {
                 postMessage("Watchdog could not start")
-                false
             }
+            return started
         } else {
-            prefs.isWatchdogEnabled = false
-            _watchdogActive.value = false
+            WatchdogControl.stop(context, prefs)
             _showBatteryOptimizationPrompt.value = false
-            context.stopService(intent)
             postMessage("Watchdog disabled")
             return true
         }

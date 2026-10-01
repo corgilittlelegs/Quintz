@@ -329,63 +329,62 @@ fun CliConnectedHeroPanel(
                     }
                 }
 
-                if (status.isSteeredOrLocked || isWatchdogActive) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    CliDivider(color = CliBorderSubtle)
-                    Spacer(modifier = Modifier.height(8.dp))
+                // Keep the runtime watchdog state visible even after Auto-Roam stops it.
+                Spacer(modifier = Modifier.height(8.dp))
+                CliDivider(color = CliBorderSubtle)
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "WATCHDOG",
+                        style = CliTypography.TelemetryLabel
+                    )
 
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(7.dp)
+                                .clip(CircleShape)
+                                .background(if (isWatchdogActive && status.isPreferred5GHzFallback) CliAccent24GHz else if (isWatchdogActive) CliAccentGreen else CliTextTertiary)
+                        )
+                        Text(
+                            text = when {
+                                !isWatchdogActive -> "OFF"
+                                status.isPreferred5GHzFallback -> "ON · 5 GHz recovery pending"
+                                status.isLockedToBssid -> "ON · monitoring pin"
+                                status.isPreferred5GHz -> "ON · monitoring 5 GHz"
+                                else -> "ON · monitoring other saved networks"
+                            },
+                            style = CliTypography.CodeMono,
+                            color = if (isWatchdogActive && status.isPreferred5GHzFallback) CliAccent24GHz else if (isWatchdogActive) CliAccentGreen else CliTextTertiary,
+                            fontSize = 11.5.sp
+                        )
+                    }
+                }
+
+                if (isWatchdogActive && batteryOptimizationExempt == false) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 44.dp)
+                            .clickable(role = androidx.compose.ui.semantics.Role.Button) {
+                                onBatterySettings?.invoke()
+                            },
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "WATCHDOG",
-                            style = CliTypography.TelemetryLabel
+                            text = "BATTERY OPTIMIZED · CONFIGURE",
+                            style = CliTypography.CodeMono,
+                            color = CliAccent24GHz
                         )
-
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(7.dp)
-                                    .clip(CircleShape)
-                                    .background(if (isWatchdogActive && status.isPreferred5GHzFallback) CliAccent24GHz else if (isWatchdogActive) CliAccentGreen else CliTextTertiary)
-                            )
-                            Text(
-                                text = when {
-                                    !isWatchdogActive -> "OFF"
-                                    status.isPreferred5GHzFallback -> "ON · 5 GHz recovery pending"
-                                    status.isLockedToBssid -> "ON · monitoring pin"
-                                    status.isPreferred5GHz -> "ON · monitoring 5 GHz"
-                                    else -> "ON · Auto on this network"
-                                },
-                                style = CliTypography.CodeMono,
-                                color = if (isWatchdogActive && status.isPreferred5GHzFallback) CliAccent24GHz else if (isWatchdogActive) CliAccentGreen else CliTextTertiary,
-                                fontSize = 11.5.sp
-                            )
-                        }
-                    }
-
-                    if (isWatchdogActive && batteryOptimizationExempt == false) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .defaultMinSize(minHeight = 44.dp)
-                                .clickable(role = androidx.compose.ui.semantics.Role.Button) {
-                                    onBatterySettings?.invoke()
-                                },
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "BATTERY OPTIMIZED · CONFIGURE",
-                                style = CliTypography.CodeMono,
-                                color = CliAccent24GHz
-                            )
-                        }
                     }
                 }
             }
@@ -427,5 +426,3 @@ fun CliTelemetryMetric(
         }
     }
 }
-
-
