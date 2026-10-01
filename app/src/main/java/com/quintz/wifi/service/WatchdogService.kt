@@ -34,8 +34,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 
 class WatchdogService : Service() {
 
@@ -56,14 +58,18 @@ class WatchdogService : Service() {
     )
 
     private val candidateObservations = mutableMapOf<String, CandidateObservation>()
+    private val statusWakeups = Channel<Unit>(Channel.CONFLATED)
+    private val lastNetworkIdentity = java.util.concurrent.atomic.AtomicReference<String?>(null)
     private var last5GSwitchAttemptTimeMs: Long = 0L
     private var switchCooldownMs: Long = 60000L
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onLost(network: Network) {
+            lastNetworkIdentity.set(null)
             if (!prefs.isWatchdogEnabled) return
             val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
             if (wm?.isWifiEnabled != true) return // User toggled Wi-Fi off intentionally
+            statusWakeups.trySend(Unit)
 
             if (prefs.watchdogLastSsid?.let { prefs.getOrMigrateWifiTargetMode(it) } != WifiTargetMode.AUTO) {
                 scope.launch {
@@ -77,6 +83,8 @@ class WatchdogService : Service() {
             if (!networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return
 
             val wifiInfo = networkCapabilities.transportInfo as? WifiInfo ?: return
+            val identity = "${network}:${wifiInfo.ssid}:${wifiInfo.bssid}:${wifiInfo.frequency}"
+            if (lastNetworkIdentity.getAndSet(identity) != identity) statusWakeups.trySend(Unit)
             val is24Ghz = wifiInfo.frequency in 2400..2500
 
             // If the Qualcomm driver gracefully roamed to 2.4 GHz while 5GHz is targeted, update status immediately
@@ -217,7 +225,7 @@ class WatchdogService : Service() {
         super.onCreate()
         DiagnosticLogger.log("SERVICE", "WatchdogService onCreate")
         controller = WifiController(this)
-        prefs = Preferences(this)
+        prefs = Preferences.get(this)
         createNotificationChannel()
         startServiceInForeground()
         
@@ -265,7 +273,8 @@ class WatchdogService : Service() {
                     DiagnosticLogger.heartbeat(prefs.isWatchdogEnabled, ShizukuManager.isReady())
                     lastHeartbeatMs = now
                 }
-                var loopDelay = 12000L
+                // Stable connections need a periodic safety check; network changes wake this loop.
+                var loopDelay = 30000L
                 if (prefs.isWatchdogEnabled) {
                     if (!ShizukuManager.isReady()) {
                         DiagnosticLogger.log("WATCHDOG", "5 GHz recovery skipped reason=shizuku_not_ready")
@@ -500,7 +509,7 @@ class WatchdogService : Service() {
                         android.util.Log.e("Watchdog", "Watchdog loop error", e)
                     }
                 }
-                delay(loopDelay)
+                withTimeoutOrNull(loopDelay) { statusWakeups.receive() }
             }
         }
     }

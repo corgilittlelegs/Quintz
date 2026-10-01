@@ -27,7 +27,7 @@ class TileService : android.service.quicksettings.TileService() {
         super.onCreate()
         DiagnosticLogger.log("TILE", "TileService onCreate")
         controller = WifiController(this)
-        prefs = Preferences(this)
+        prefs = Preferences.get(this)
     }
 
     override fun onTileAdded() {

@@ -66,6 +66,23 @@ class WifiParserTest {
     }
 
     @Test
+    fun testParseScanResults_preservesBracketsInSsidAndTrailingFlagGroups() {
+        val scanOutput = """
+            BSSID              Frequency      RSSI           Age(sec)     SSID              Flags
+            30:de:4b:31:55:30  5745           -68            1            Office [5G]       [WPA2-PSK-CCMP][ESS]
+            54:46:17:11:22:33  5180           -50            2            [CorpNet] Guest   [WPA2-PSK-CCMP]
+        """.trimIndent()
+
+        val results = WifiParser.parseScanResults(scanOutput, "Office [5G]", "30:de:4b:31:55:30")
+
+        assertEquals(2, results.size)
+        assertEquals("Office [5G]", results[0].ssid)
+        assertEquals("[WPA2-PSK-CCMP][ESS]", results[0].flags)
+        assertEquals("[CorpNet] Guest", results[1].ssid)
+        assertEquals("[WPA2-PSK-CCMP]", results[1].flags)
+    }
+
+    @Test
     fun testParseScanResults_rejectsStaleResults() {
         val scanOutput = """
             BSSID              Frequency      RSSI           Age(sec)     SSID        Flags

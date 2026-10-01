@@ -3,6 +3,9 @@ package com.quintz.wifi.core
 import android.os.SystemClock
 import com.quintz.wifi.model.AccessPointRadio
 import com.quintz.wifi.model.BandType
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -18,6 +21,8 @@ internal data class WifiScanBatch(
 internal object WifiScanCoordinator {
     private const val COALESCE_WINDOW_MS = 1_500L
     private val mutex = Mutex()
+    private val _isScanning = MutableStateFlow(false)
+    val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
     private var lastSuccessfulScan: WifiScanBatch? = null
     private var totalRequests = 0L
     private var actualScans = 0L
@@ -26,8 +31,10 @@ internal object WifiScanCoordinator {
     suspend fun scan(
         freshForSsid: String?,
         freshForBssid: String?,
+        onLockAcquired: () -> Unit,
         block: suspend (Map<String, Long>) -> WifiScanBatch
     ): Pair<WifiScanBatch, Boolean> = mutex.withLock {
+        onLockAcquired()
         totalRequests++
         val now = SystemClock.elapsedRealtime()
         val cached = lastSuccessfulScan
@@ -50,7 +57,12 @@ internal object WifiScanCoordinator {
         val previousAges = cached?.radios?.associate {
             it.bssid.lowercase() to (it.ageSeconds + cacheAgeSeconds)
         }.orEmpty()
-        val result = block(previousAges)
+        _isScanning.value = true
+        val result = try {
+            block(previousAges)
+        } finally {
+            _isScanning.value = false
+        }
         if (result.succeeded) lastSuccessfulScan = result
         DiagnosticLogger.log("WIFI_SCAN", "coordinator=scan_attempt totalRequests=$totalRequests actualScans=$actualScans coalescedRequests=$coalescedRequests succeeded=${result.succeeded}")
         result to false

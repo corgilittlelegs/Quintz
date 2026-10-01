@@ -23,7 +23,11 @@ import kotlinx.coroutines.withContext
 
 class WifiController(private val context: Context) {
 
-    private val prefs = Preferences(context)
+    private val prefs = Preferences.get(context)
+    private data class ProfileLockSnapshot(val ssid: String, val locked: Boolean, val bssid: String?, val observedAtMs: Long)
+    private companion object {
+        @Volatile var profileLockSnapshot: ProfileLockSnapshot? = null
+    }
 
     @Volatile var lastPasswordStorageFailure: Boolean = false
         private set
@@ -34,11 +38,18 @@ class WifiController(private val context: Context) {
     private val _radios = MutableStateFlow<List<AccessPointRadio>>(emptyList())
     val radios: StateFlow<List<AccessPointRadio>> = _radios.asStateFlow()
 
-    private val _isOperating = MutableStateFlow(false)
-    val isOperating: StateFlow<Boolean> = _isOperating.asStateFlow()
+    val isOperating: StateFlow<Boolean> = WifiOperationCoordinator.isOperating
 
-    private val _isScanning = MutableStateFlow(false)
-    val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
+    val isScanning: StateFlow<Boolean> = WifiScanCoordinator.isScanning
+    private val _isScanQueued = MutableStateFlow(false)
+    val isScanQueued: StateFlow<Boolean> = _isScanQueued.asStateFlow()
+    private val scanQueueGuard = Any()
+    private var queuedScanCount = 0
+
+    private fun changeQueuedScans(delta: Int) = synchronized(scanQueueGuard) {
+        queuedScanCount += delta
+        _isScanQueued.value = queuedScanCount > 0
+    }
 
     fun getNativeWifiStatus(): WifiStatus {
         try {
@@ -106,7 +117,7 @@ class WifiController(private val context: Context) {
     }
 
     suspend fun refreshStatus(forceFresh: Boolean = false): WifiStatus = withContext(Dispatchers.IO) {
-        val (status, coalesced) = WifiStatusCoordinator.refresh(forceFresh) { refreshStatusDirect() }
+        val (status, coalesced) = WifiStatusCoordinator.refresh(forceFresh) { refreshStatusDirect(forceFresh) }
         _status.value = status
         if (coalesced) {
             DiagnosticLogger.log("WIFI_STATUS", "result=coalesced ageMs=${(System.currentTimeMillis() - status.observedAtMillis).coerceAtLeast(0L)}")
@@ -114,10 +125,11 @@ class WifiController(private val context: Context) {
         status
     }
 
-    private suspend fun refreshStatusDirect(): WifiStatus = withContext(Dispatchers.IO) {
+    private suspend fun refreshStatusDirect(forceFresh: Boolean): WifiStatus = withContext(Dispatchers.IO) {
         val nativeStatus = getNativeWifiStatus()
 
         if (!ShizukuManager.isReady()) {
+            profileLockSnapshot = null
             val observed = nativeStatus.copy(observedAtMillis = System.currentTimeMillis())
             _status.value = observed
             return@withContext observed
@@ -183,14 +195,24 @@ class WifiController(private val context: Context) {
 
         // 4. Determine if currently connected AP is locked in Android's saved network configuration
         val finalStatus = if (status.isConnected && status.ssid.isNotEmpty()) {
-            val literalMatch = ShizukuManager.escapeShellArg("SSID: \"${status.ssid}\"")
-            val lockCheck = ShizukuManager.exec("dumpsys wifi 2>/dev/null | grep -F $literalMatch")
-            // Saved network configurations in dumpsys wifi always contain "PROVIDER-NAME:".
-            // Crucially ignore lines like "mWifiInfo" which represent active connection telemetry, not configuration locks.
-            val targetLine = lockCheck.stdout.lines().firstOrNull {
-                it.contains("PROVIDER-NAME:") && it.contains("SSID: \"${status.ssid}\"")
-            } ?: ""
-            val (isProfileLocked, lockedBssid) = WifiParser.parseLockedBssid(targetLine)
+            val now = SystemClock.elapsedRealtime()
+            val cachedLock = profileLockSnapshot?.takeIf {
+                !forceFresh && it.ssid == status.ssid && now - it.observedAtMs in 0L..60_000L
+            }
+            val profileLock = cachedLock ?: run {
+                val literalMatch = ShizukuManager.escapeShellArg("SSID: \"${status.ssid}\"")
+                val lockCheck = ShizukuManager.exec("dumpsys wifi 2>/dev/null | grep -F $literalMatch")
+                // Ignore mWifiInfo: only a saved profile line can prove a BSSID pin.
+                val targetLine = lockCheck.stdout.lines().firstOrNull {
+                    it.contains("PROVIDER-NAME:") && it.contains("SSID: \"${status.ssid}\"")
+                } ?: ""
+                val (locked, bssid) = WifiParser.parseLockedBssid(targetLine)
+                ProfileLockSnapshot(status.ssid, locked, bssid, now).also {
+                    profileLockSnapshot = if (lockCheck.isSuccess && targetLine.isNotEmpty()) it else null
+                }
+            }
+            val isProfileLocked = profileLock.locked
+            val lockedBssid = profileLock.bssid
             val isCurrentlyHardLocked = isProfileLocked && lockedBssid.equals(status.bssid, ignoreCase = true)
             val targetMode = prefs.getOrMigrateWifiTargetMode(status.ssid, if (isProfileLocked) lockedBssid else null)
             if (targetMode == WifiTargetMode.PIN_BSSID && isProfileLocked && !lockedBssid.isNullOrBlank()) {
@@ -208,6 +230,7 @@ class WifiController(private val context: Context) {
                 isPreferred5GHzFallback = isPreferred5GFallback
             )
         } else {
+            profileLockSnapshot = null
             status
         }
 
@@ -254,9 +277,13 @@ class WifiController(private val context: Context) {
     ): List<AccessPointRadio> = withContext(Dispatchers.IO) {
         if (!ShizukuManager.isReady()) return@withContext emptyList()
 
-        _isScanning.value = true
+        var lockAcquired = false
+        changeQueuedScans(1)
         try {
-            val (batch, coalesced) = WifiScanCoordinator.scan(freshForSsid, freshForBssid) { previousAges ->
+            val (batch, coalesced) = WifiScanCoordinator.scan(freshForSsid, freshForBssid, onLockAcquired = {
+                lockAcquired = true
+                changeQueuedScans(-1)
+            }) { previousAges ->
                 scanRadiosDirect(correlationId, freshForSsid, freshForBssid, previousAges)
             }
             val currentBssid = _status.value.bssid
@@ -277,7 +304,7 @@ class WifiController(private val context: Context) {
             }
             radios
         } finally {
-            _isScanning.value = false
+            if (!lockAcquired) changeQueuedScans(-1)
         }
     }
 
@@ -484,7 +511,6 @@ class WifiController(private val context: Context) {
 
         val policy = macAddressPolicy ?: prefs.getMacPolicy(ssid) ?: prefs.defaultMacPolicy
 
-        _isOperating.value = true
         DiagnosticLogger.log(
             "WIFI",
             "id=$correlationId source=$requestSource Lock request: SSID='$ssid', BSSID=$bssid, sec='$securityType', MAC=${policy.displayName} (-r ${policy.shellFlagValue}), unpinForRoaming=$unpinProfileForRoaming, deferIfHealthy24Ghz=$deferIfHealthy24Ghz"
@@ -751,8 +777,6 @@ class WifiController(private val context: Context) {
                 }
             } catch (e: Exception) {
                 DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId result=rollback_failed error=${e.javaClass.simpleName}")
-            } finally {
-                _isOperating.value = false
             }
         }
         } finally {
@@ -787,9 +811,7 @@ class WifiController(private val context: Context) {
         }
 
         val policy = macAddressPolicy ?: prefs.getMacPolicy(ssid) ?: prefs.defaultMacPolicy
-        _isOperating.value = true
         DiagnosticLogger.log("WIFI", "id=$correlationId source=$requestSource Unlock request (Auto-Roam): SSID='$ssid', MAC=${policy.displayName}, isFallback=$isAutomatedFallback")
-        try {
             val pass = passphrase ?: prefs.getPassword(ssid).orEmpty()
             val sec = if (securityType.isNotEmpty()) securityType else detectSecurityType(ssid, "")
             val isOpen = sec == "open" || sec == "owe"
@@ -871,9 +893,6 @@ class WifiController(private val context: Context) {
                 "id=$correlationId source=$requestSource result=$verified action=unlock_to_auto connected=${_status.value.isConnected} currentBssid=${_status.value.bssid} band=${_status.value.band.displayName} rssi=${_status.value.rssi} locked=${_status.value.isLockedToBssid} preferred5G=${_status.value.isPreferred5GHz}"
             )
             verified
-        } finally {
-            _isOperating.value = false
-        }
         } finally {
             WifiOperationCoordinator.end()
         }

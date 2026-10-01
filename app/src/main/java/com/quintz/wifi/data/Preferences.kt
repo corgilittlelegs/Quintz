@@ -8,7 +8,15 @@ import com.quintz.wifi.model.MacAddressPolicy
 
 enum class WifiTargetMode { AUTO, PREFER_5_GHZ, PIN_BSSID }
 
-class Preferences(context: Context) {
+class Preferences private constructor(context: Context) {
+
+    companion object {
+        @Volatile private var instance: Preferences? = null
+
+        fun get(context: Context): Preferences = instance ?: synchronized(this) {
+            instance ?: Preferences(context.applicationContext).also { instance = it }
+        }
+    }
 
     private val fallbackPrefs = context.getSharedPreferences("prefs", Context.MODE_PRIVATE)
     private var legacyPasswordCleanupSucceeded = true
@@ -82,8 +90,10 @@ class Preferences(context: Context) {
             }
         }
         // This legacy setting was never used by the steering control path.
-        prefs.edit().remove("fallback_threshold").apply()
-        fallbackPrefs.edit().remove("fallback_threshold").apply()
+        if (prefs.contains("fallback_threshold")) prefs.edit().remove("fallback_threshold").apply()
+        if (fallbackPrefs !== prefs && fallbackPrefs.contains("fallback_threshold")) {
+            fallbackPrefs.edit().remove("fallback_threshold").apply()
+        }
     }
 
     val isPasswordStorageAvailable: Boolean get() = securePrefs != null && legacyPasswordCleanupSucceeded

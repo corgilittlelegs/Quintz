@@ -8,6 +8,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.SideEffect
+import androidx.core.view.WindowCompat
 import com.quintz.wifi.shizuku.ShizukuManager
 import com.quintz.wifi.ui.theme.AppTheme
 
@@ -30,7 +33,14 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            AppTheme {
+            val darkTheme = isSystemInDarkTheme()
+            SideEffect {
+                WindowCompat.getInsetsController(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = !darkTheme
+                    isAppearanceLightNavigationBars = !darkTheme
+                }
+            }
+            AppTheme(darkTheme = darkTheme) {
                 MainScreen(viewModel = viewModel)
             }
         }

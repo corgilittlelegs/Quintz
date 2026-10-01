@@ -26,12 +26,14 @@ import com.quintz.wifi.service.TileStateTracker
 import com.quintz.wifi.service.WatchdogService
 import com.quintz.wifi.shizuku.ShizukuManager
 import com.quintz.wifi.telemetry.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -39,7 +41,7 @@ import kotlinx.coroutines.withContext
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val controller = WifiController(application)
-    val prefs = Preferences(application)
+    val prefs = Preferences.get(application)
 
     private val securePasswordError = "Cannot save the Wi-Fi password securely. Unlock the device, check Android's secure storage, then retry. No password was saved in plain text."
 
@@ -60,9 +62,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val radios: StateFlow<List<AccessPointRadio>> = controller.radios
     val isOperating: StateFlow<Boolean> = controller.isOperating
     val isScanning: StateFlow<Boolean> = controller.isScanning
+    val isScanQueued: StateFlow<Boolean> = controller.isScanQueued
 
-    private val _message = MutableStateFlow<String?>(null)
-    val message: StateFlow<String?> = _message.asStateFlow()
+    private val messageChannel = Channel<String>(Channel.UNLIMITED)
+    val messages = messageChannel.receiveAsFlow()
+
+    private fun postMessage(message: String) {
+        messageChannel.trySend(message)
+    }
 
     private val _watchdogActive = MutableStateFlow(prefs.isWatchdogEnabled)
     val watchdogActive: StateFlow<Boolean> = _watchdogActive.asStateFlow()
@@ -220,7 +227,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         lastGraphRefreshMillis = now
                     }
                 }
-                delay(1000)
+                delay(5000)
             }
         }
     }
@@ -234,7 +241,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (scannerJob?.isActive == true) return
         scannerJob = viewModelScope.launch {
             while (isActive) {
-                if (isForeground && ShizukuManager.isReady() && !controller.isOperating.value && !controller.isScanning.value) {
+                if (isForeground && ShizukuManager.isReady() && !controller.isOperating.value &&
+                    !controller.isScanning.value && !controller.isScanQueued.value) {
                     controller.scanRadios()
                 }
                 delay(8500) // ~10s total cycle time (1.5s scan + 8.5s rest)
@@ -471,7 +479,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     else -> "wpa2"
                 }
                 if (isSecured && pass.isEmpty()) {
-                    _message.value = if (prefs.isPasswordStorageAvailable) "Save this network's password before applying a MAC change" else securePasswordError
+                    postMessage(if (prefs.isPasswordStorageAvailable) "Save this network's password before applying a MAC change" else securePasswordError)
                     return@launch
                 }
                 val previousPolicy = prefs.getMacPolicy(ssid)
@@ -480,7 +488,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     WifiTargetMode.PIN_BSSID -> {
                         val pinnedBssid = prefs.getPinnedBssid(ssid) ?: status.lockedBssid
                         if (pinnedBssid.isNullOrBlank()) {
-                            _message.value = "No pinned radio is saved for this network; choose one in the app first"
+                            postMessage("No pinned radio is saved for this network; choose one in the app first")
                             return@launch
                         }
                         controller.lockToBssid(
@@ -498,19 +506,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (success) {
                     prefs.setMacPolicy(ssid, policy)
-                    _message.value = "MAC mode changed to ${policy.displayName}; ${targetMode.name.replace('_', ' ')} kept"
+                    postMessage("MAC mode changed to ${policy.displayName}; ${targetMode.name.replace('_', ' ')} kept")
                 } else {
                     if (previousPolicy == null) prefs.clearMacPolicy(ssid) else prefs.setMacPolicy(ssid, previousPolicy)
-                    _message.value = when {
+                    postMessage(when {
                         controller.lastPasswordStorageFailure -> securePasswordError
                         targetMode == WifiTargetMode.PREFER_5_GHZ -> "MAC mode unchanged: choose and connect to a trusted 5 GHz radio in the app, then retry"
                         else -> "MAC mode change could not be verified. Previous preference kept; check the active connection"
-                    }
+                    })
                 }
                 refreshAll()
             } else {
                 prefs.setMacPolicy(ssid, policy)
-                _message.value = "MAC mode saved for the next Quintz action on this network"
+                postMessage("MAC mode saved for the next Quintz action on this network")
             }
         }
     }
@@ -547,12 +555,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
             if (!status.isConnected || status.ssid.isEmpty()) {
                 DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId source=$requestSource result=aborted reason=not_connected")
-                _message.value = "Device is not connected to any Wi-Fi network"
+                postMessage("Device is not connected to any Wi-Fi network")
                 return@launch
             }
 
             if (password.isNotEmpty() && !prefs.isPasswordStorageAvailable) {
-                _message.value = securePasswordError
+                postMessage(securePasswordError)
                 return@launch
             }
 
@@ -576,14 +584,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 val watchdogStarted = toggleWatchdog(true)
-                _message.value = "Preferred 5 GHz active with roaming allowed (${policy.displayName})" +
-                    if (watchdogStarted) "; Watchdog active" else "; Watchdog could not start"
+                postMessage("Preferred 5 GHz active with roaming allowed (${policy.displayName})" +
+                    if (watchdogStarted) "; Watchdog active" else "; Watchdog could not start")
             } else {
-                _message.value = when {
+                postMessage(when {
                     controller.lastPasswordStorageFailure -> securePasswordError
                     approvedBssid != null -> "Could not verify the selected 5 GHz radio. Rescan and retry."
                     else -> "Choose and connect to a 5 GHz radio in the app once to trust it, then retry. The radio must also be fresh and compatible."
-                }
+                })
             }
         }
     }
@@ -604,7 +612,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val targetSsid = radio.ssid.ifEmpty { status.ssid }
             val policy = macPolicy ?: prefs.getMacPolicy(targetSsid) ?: prefs.defaultMacPolicy
             if (password.isNotEmpty() && !prefs.isPasswordStorageAvailable) {
-                _message.value = securePasswordError
+                postMessage(securePasswordError)
                 return@launch
             }
             val success = controller.lockToBssid(
@@ -624,15 +632,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     verified.bssid.equals(radio.bssid, ignoreCase = true)) {
                     prefs.trustSelectedRadio(targetSsid, radio.bssid, verified.securityType)
                 } else false
-                _message.value = "Locked to AP [${radio.bssid}] on ${radio.band.displayName} (${policy.displayName})" +
+                postMessage("Locked to AP [${radio.bssid}] on ${radio.band.displayName} (${policy.displayName})" +
                     (if (trusted) "; trusted for future automatic steering" else "; automatic recovery is unavailable until this radio can be trusted") +
-                    (if (trusted && !prefs.isWatchdogEnabled) "; turn on Watchdog for automatic recovery" else "")
+                    (if (trusted && !prefs.isWatchdogEnabled) "; turn on Watchdog for automatic recovery" else ""))
             } else {
-                _message.value = when {
+                postMessage(when {
                     controller.lastPasswordStorageFailure -> securePasswordError
                     !WifiSecurityPolicy.isSupported(radio.flags) -> "This radio's security could not be verified; no connection was changed"
                     else -> "Could not confirm lock to [${radio.bssid}]. Check signal strength."
-                }
+                })
             }
         }
     }
@@ -652,9 +660,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId source=$requestSource result=${if (success) "success" else "failure"} action=unlock_to_auto")
             refreshAll()
             if (success) {
-                _message.value = "Reverted to Auto-Roam mode"
+                postMessage("Reverted to Auto-Roam mode")
             } else {
-                _message.value = "Failed to unlock to Auto"
+                postMessage("Failed to unlock to Auto")
             }
         }
     }
@@ -673,13 +681,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _watchdogActive.value = true
                 refreshBatteryOptimizationStatus()
                 DiagnosticLogger.log("WATCHDOG", "result=started source=preferred_5ghz")
-                _message.value = "Watchdog on; each network follows its saved mode"
+                postMessage("Watchdog on; each network follows its saved mode")
                 true
             } catch (e: Exception) {
                 prefs.isWatchdogEnabled = false
                 _watchdogActive.value = false
                 DiagnosticLogger.log("WATCHDOG", "result=failed reason=${e.javaClass.simpleName}")
-                _message.value = "Watchdog could not start"
+                postMessage("Watchdog could not start")
                 false
             }
         } else {
@@ -687,7 +695,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _watchdogActive.value = false
             _showBatteryOptimizationPrompt.value = false
             context.stopService(intent)
-            _message.value = "Watchdog disabled"
+            postMessage("Watchdog disabled")
             return true
         }
     }
@@ -713,10 +721,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun dismissBatteryOptimizationExplanation() {
         _showBatteryOptimizationPrompt.value = false
-    }
-
-    fun clearMessage() {
-        _message.value = null
     }
 
     fun getSavedPassword(ssid: String): String = prefs.getPassword(ssid).orEmpty()
@@ -775,15 +779,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (result == android.app.StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED) {
                     _isTileAdded.value = true
                     prefs.isQuickTileAdded = true
-                    _message.value = "Quintz tile added to Quick Settings!"
+                    postMessage("Quintz tile added to Quick Settings!")
                 } else if (result == android.app.StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ALREADY_ADDED) {
                     _isTileAdded.value = true
                     prefs.isQuickTileAdded = true
-                    _message.value = "Tile is already in your Quick Settings panel"
+                    postMessage("Tile is already in your Quick Settings panel")
                 }
             }
         } else {
-            _message.value = "Swipe down twice and tap Edit (✎) to add Quintz tile"
+            postMessage("Swipe down twice and tap Edit (✎) to add Quintz tile")
         }
     }
 
@@ -797,19 +801,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         .map { it.trim() }
                         .filter { it.isNotEmpty() && !it.contains("com.quintz.wifi/.service.TileService") }
                         .joinToString(",")
-                    val writeRes = ShizukuManager.exec("settings put secure sysui_qs_tiles '$newTiles'")
+                    val writeRes = ShizukuManager.exec("settings put secure sysui_qs_tiles ${ShizukuManager.escapeShellArg(newTiles)}")
                     if (writeRes.isSuccess) {
                         prefs.isQuickTileAdded = false
                         withContext(Dispatchers.Main) {
                             _isTileAdded.value = false
-                            _message.value = "Quick Settings tile removed"
+                            postMessage("Quick Settings tile removed")
                         }
                         return@launch
                     }
                 }
             }
             withContext(Dispatchers.Main) {
-                _message.value = "Swipe down twice and tap Edit (✎) to remove Quintz tile"
+                postMessage("Swipe down twice and tap Edit (✎) to remove Quintz tile")
             }
         }
     }

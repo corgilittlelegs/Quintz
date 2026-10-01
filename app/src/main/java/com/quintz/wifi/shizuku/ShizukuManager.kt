@@ -197,19 +197,15 @@ object ShizukuManager {
 
             // Read stdout and stderr concurrently via shared thread pool to prevent pipe buffer deadlock
             val stdoutFuture = shellExecutor.submit {
-                try {
-                    process.inputStream.bufferedReader().useLines { lines ->
-                        lines.forEach { line -> stdoutBuilder.appendLine(line) }
-                    }
-                } catch (_: Exception) {}
+                process.inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { line -> stdoutBuilder.appendLine(line) }
+                }
             }
 
             val stderrFuture = shellExecutor.submit {
-                try {
-                    process.errorStream.bufferedReader().useLines { lines ->
-                        lines.forEach { line -> stderrBuilder.appendLine(line) }
-                    }
-                } catch (_: Exception) {}
+                process.errorStream.bufferedReader().useLines { lines ->
+                    lines.forEach { line -> stderrBuilder.appendLine(line) }
+                }
             }
 
             val waitFuture = shellExecutor.submit<Int> {
@@ -234,8 +230,16 @@ object ShizukuManager {
                 return ShellResult(-1, "", "Command timed out after ${timeoutSeconds}s")
             }
 
-            try { stdoutFuture.get(1, TimeUnit.SECONDS) } catch (_: Exception) {}
-            try { stderrFuture.get(1, TimeUnit.SECONDS) } catch (_: Exception) {}
+            try {
+                stdoutFuture.get(1, TimeUnit.SECONDS)
+                stderrFuture.get(1, TimeUnit.SECONDS)
+            } catch (e: Exception) {
+                stdoutFuture.cancel(true)
+                stderrFuture.cancel(true)
+                if (e is InterruptedException) Thread.currentThread().interrupt()
+                DiagnosticLogger.log("CMD", "✗ Output read failed: ${DiagnosticLogger.commandName(command)} (${e.javaClass.simpleName})")
+                return ShellResult(-1, "", "Failed to read command output: ${e.javaClass.simpleName}")
+            }
 
             val stdout = stdoutBuilder.toString().trim()
             val stderr = stderrBuilder.toString().trim()

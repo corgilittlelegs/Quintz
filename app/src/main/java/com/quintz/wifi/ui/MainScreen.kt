@@ -79,7 +79,7 @@ fun MainScreen(viewModel: MainViewModel) {
     val radios by viewModel.radios.collectAsState()
     val isOperating by viewModel.isOperating.collectAsState()
     val isScanning by viewModel.isScanning.collectAsState()
-    val message by viewModel.message.collectAsState()
+    val isScanQueued by viewModel.isScanQueued.collectAsState()
     val watchdogActive by viewModel.watchdogActive.collectAsState()
     val batteryOptimizationExempt by viewModel.batteryOptimizationExempt.collectAsState()
     val showBatteryOptimizationPrompt by viewModel.showBatteryOptimizationPrompt.collectAsState()
@@ -222,7 +222,6 @@ fun MainScreen(viewModel: MainViewModel) {
     var selectedPhoneTab by rememberSaveable { mutableStateOf(PhoneTab.CONTROLS) }
 
     // RF Telemetry Graph State from ViewModel
-    val telemetryState by viewModel.telemetryState.collectAsState()
 
     val filteredRadios = remember(radios, selectedFilter) {
         when (selectedFilter) {
@@ -232,10 +231,9 @@ fun MainScreen(viewModel: MainViewModel) {
         }
     }
 
-    LaunchedEffect(message) {
-        message?.let {
-            snackbarHostState.showSnackbar(it)
-            viewModel.clearMessage()
+    LaunchedEffect(viewModel) {
+        viewModel.messages.collect { message ->
+            snackbarHostState.showSnackbar(message)
         }
     }
 
@@ -513,7 +511,8 @@ fun MainScreen(viewModel: MainViewModel) {
                                     )
                                     CliScannerRefreshButton(
                                         isScanning = isScanning,
-                                        enabled = !isOperating && shizukuState.isPermissionGranted,
+                                        isQueued = isScanQueued,
+                                        enabled = !isOperating && !isScanning && !isScanQueued && shizukuState.isPermissionGranted,
                                         onRefresh = { viewModel.refreshAll() },
                                         showLabel = true
                                     )
@@ -570,19 +569,15 @@ fun MainScreen(viewModel: MainViewModel) {
                                 }
 
                                 RightPaneView.GRAPH -> {
-                                    WifiGraphView(
-                                        state = telemetryState,
-                                        ageClock = viewModel.telemetryClock,
-                                        onTogglePause = { viewModel.togglePauseTelemetry() },
-                                        onClearHistory = { viewModel.clearTelemetryHistory() },
-                                        onSelectCandidate = { viewModel.selectCandidateBssid(it) },
+                                    GraphPane(
+                                        viewModel = viewModel,
+                                        isConnected = wifiStatus.isConnected,
                                         onLockBssid = { bssid ->
                                             val radio = radios.find { it.bssid.equals(bssid, ignoreCase = true) }
                                             if (radio != null) {
                                                 requestRadioBind(radio, "graph")
                                             }
-                                        },
-                                        isConnected = wifiStatus.isConnected
+                                        }
                                     )
                                 }
                             }
@@ -744,7 +739,8 @@ fun MainScreen(viewModel: MainViewModel) {
                                             )
                                             CliScannerRefreshButton(
                                                 isScanning = isScanning,
-                                                enabled = !isOperating && shizukuState.isPermissionGranted,
+                                                isQueued = isScanQueued,
+                                                enabled = !isOperating && !isScanning && !isScanQueued && shizukuState.isPermissionGranted,
                                                 onRefresh = { viewModel.refreshAll() },
                                                 showLabel = false
                                             )
@@ -798,19 +794,15 @@ fun MainScreen(viewModel: MainViewModel) {
                             }
 
                             PhoneTab.GRAPH -> {
-                                WifiGraphView(
-                                    state = telemetryState,
-                                    ageClock = viewModel.telemetryClock,
-                                    onTogglePause = { viewModel.togglePauseTelemetry() },
-                                    onClearHistory = { viewModel.clearTelemetryHistory() },
-                                    onSelectCandidate = { viewModel.selectCandidateBssid(it) },
+                                GraphPane(
+                                    viewModel = viewModel,
+                                    isConnected = wifiStatus.isConnected,
                                     onLockBssid = { bssid ->
                                         val radio = radios.find { it.bssid.equals(bssid, ignoreCase = true) }
                                         if (radio != null) {
                                             requestRadioBind(radio, "graph")
                                         }
-                                    },
-                                    isConnected = wifiStatus.isConnected
+                                    }
                                 )
                             }
                         }
@@ -1005,66 +997,19 @@ fun MainScreen(viewModel: MainViewModel) {
     }
 
     if (showMacPolicyDialog) {
-        Dialog(onDismissRequest = {
-            showMacPolicyDialog = false
-            pendingLockAction = null
-        }) {
-            CliPanel(
-                borderColor = CliAccent5GHz,
-                containerColor = CliSurface,
-                shape = RoundedCornerShape(8.dp),
-                contentPadding = PaddingValues(20.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = "MAC ADDRESS IDENTITY",
-                        style = CliTypography.TelemetryLabel,
-                        color = CliAccent5GHz
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "Network: $targetSsidForMacPolicy",
-                        style = Typography.headlineSmall,
-                        color = CliTextPrimary
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Choose how Android identifies this device on this Wi-Fi network. This choice is remembered per SSID.",
-                        style = Typography.bodyMedium,
-                        color = CliTextSecondary
-                    )
-
-                    Spacer(modifier = Modifier.height(18.dp))
-
-                    CliButton(
-                        text = "USE DEVICE MAC  •  DHCP RESERVATIONS",
-                        variant = CliButtonVariant.Primary,
-                        onClick = {
-                            viewModel.setMacPolicy(targetSsidForMacPolicy, MacAddressPolicy.DEVICE)
-                            showMacPolicyDialog = false
-                            pendingLockAction?.invoke()
-                            pendingLockAction = null
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    CliButton(
-                        text = "USE RANDOMIZED MAC  •  PRIVACY",
-                        variant = CliButtonVariant.Ghost,
-                        onClick = {
-                            viewModel.setMacPolicy(targetSsidForMacPolicy, MacAddressPolicy.RANDOMIZED)
-                            showMacPolicyDialog = false
-                            pendingLockAction?.invoke()
-                            pendingLockAction = null
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
+        MacPolicyDialog(
+            targetSsid = targetSsidForMacPolicy,
+            onSelect = { policy ->
+                viewModel.setMacPolicy(targetSsidForMacPolicy, policy)
+                showMacPolicyDialog = false
+                pendingLockAction?.invoke()
+                pendingLockAction = null
+            },
+            onCancel = {
+                showMacPolicyDialog = false
+                pendingLockAction = null
             }
-        }
+        )
     }
 
     if (showBatteryOptimizationPrompt) {
@@ -1239,688 +1184,20 @@ fun MainScreen(viewModel: MainViewModel) {
 }
 
 @Composable
-fun CliShizukuPanel(
-    shizukuState: ShizukuState,
-    onOpenShizuku: () -> Unit,
-    onOpenPlayStore: () -> Unit,
-    onRequestPermission: () -> Unit
+private fun GraphPane(
+    viewModel: MainViewModel,
+    isConnected: Boolean,
+    onLockBssid: (String) -> Unit
 ) {
-    val isAlert = !shizukuState.isInstalled
-    val isWarning = !shizukuState.isPermissionGranted
-    val (cardBorderColor, cardBgColor) = when {
-        isAlert -> Pair(CliAccentRed.copy(alpha = 0.5f), CliAccentRedBg)
-        isWarning -> Pair(CliAccent24GHz.copy(alpha = 0.5f), CliAccent24GHzBg)
-        else -> Pair(CliBorder, CliSurface)
-    }
-
-    CliPanel(
-        containerColor = cardBgColor,
-        borderColor = cardBorderColor,
-        contentPadding = PaddingValues(16.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "SHIZUKU PRIVILEGED SERVICE",
-                    style = CliTypography.TelemetryLabel
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                when {
-                    shizukuState.isPermissionGranted -> {
-                        CliBadge(
-                            text = if (shizukuState.version > 0) "ACTIVE v${shizukuState.version}" else "ACTIVE",
-                            accentColor = CliAccentGreen,
-                            backgroundColor = CliAccentGreenBg,
-                            borderColor = CliAccentGreen.copy(alpha = 0.5f)
-                        )
-                    }
-                    shizukuState.isRunning -> {
-                        CliBadge(
-                            text = "AUTH REQUIRED",
-                            accentColor = CliAccent24GHz,
-                            backgroundColor = CliAccent24GHzBg,
-                            borderColor = CliAccent24GHz.copy(alpha = 0.5f)
-                        )
-                    }
-                    shizukuState.isInstalled -> {
-                        CliBadge(
-                            text = "DAEMON STOPPED",
-                            accentColor = CliAccent24GHz,
-                            backgroundColor = CliAccent24GHzBg,
-                            borderColor = CliAccent24GHz.copy(alpha = 0.5f)
-                        )
-                    }
-                    else -> {
-                        CliBadge(
-                            text = "NOT INSTALLED",
-                            accentColor = CliAccentRed,
-                            backgroundColor = CliAccentRedBg,
-                            borderColor = CliAccentRed.copy(alpha = 0.5f)
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = when {
-                        shizukuState.isPermissionGranted ->
-                            "Privileged API active. Quintz executes low-level Wi-Fi steering and BSSID binding without root."
-                        shizukuState.isRunning ->
-                            "Daemon is running. Authorize Quintz to unlock BSSID binding and RF telemetry."
-                        shizukuState.isInstalled ->
-                            "App installed, but service daemon is stopped. Start via Wireless Debugging in Shizuku."
-                        else ->
-                            "Shizuku service is required to bypass Android network restrictions and bind BSSIDs."
-                    },
-                    style = Typography.bodyMedium,
-                    color = CliTextSecondary
-                )
-            }
-
-            Spacer(modifier = Modifier.width(14.dp))
-
-            when {
-                !shizukuState.isInstalled -> {
-                    CliButton(
-                        text = "GET SHIZUKU ↗",
-                        variant = CliButtonVariant.Primary,
-                        onClick = onOpenPlayStore
-                    )
-                }
-                !shizukuState.isRunning -> {
-                    CliButton(
-                        text = "OPEN SHIZUKU ↗",
-                        variant = CliButtonVariant.Primary,
-                        onClick = onOpenShizuku
-                    )
-                }
-                !shizukuState.isPermissionGranted -> {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        CliButton(
-                            text = "OPEN ↗",
-                            variant = CliButtonVariant.Outlined,
-                            onClick = onOpenShizuku
-                        )
-                        CliButton(
-                            text = "GRANT",
-                            variant = CliButtonVariant.Primary,
-                            onClick = onRequestPermission
-                        )
-                    }
-                }
-                else -> {
-                    CliButton(
-                        text = "OPEN APP ↗",
-                        variant = CliButtonVariant.Outlined,
-                        onClick = onOpenShizuku
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun CliConnectedHeroPanel(
-    status: WifiStatus,
-    isOperating: Boolean,
-    recoveryThresholdRssi: Int,
-    onToggleLock: () -> Unit,
-    onOpenGraph: (() -> Unit)? = null,
-    onGetMacPolicy: ((String) -> MacAddressPolicy?)? = null,
-    onToggleMacPolicy: ((String) -> Unit)? = null,
-    isWatchdogActive: Boolean = false,
-    batteryOptimizationExempt: Boolean? = null,
-    onBatterySettings: (() -> Unit)? = null
-) {
-    val is5G = status.band == BandType.BAND_5_GHZ || status.band == BandType.BAND_6_GHZ
-    val isLocked = status.isSteeredOrLocked
-    val lockAccent = when {
-        status.isPreferred5GHzFallback -> CliAccent24GHz
-        is5G -> CliAccent5GHz
-        else -> CliAccent24GHz
-    }
-
-    val borderColor by animateColorAsState(
-        targetValue = if (isLocked) lockAccent.copy(alpha = 0.6f) else CliBorder,
-        label = "heroBorder"
+    // Keep frequent telemetry updates inside this pane's own recomposition scope.
+    val telemetryState by viewModel.telemetryState.collectAsState()
+    WifiGraphView(
+        state = telemetryState,
+        ageClock = viewModel.telemetryClock,
+        onTogglePause = { viewModel.togglePauseTelemetry() },
+        onClearHistory = { viewModel.clearTelemetryHistory() },
+        onSelectCandidate = { viewModel.selectCandidateBssid(it) },
+        onLockBssid = onLockBssid,
+        isConnected = isConnected
     )
-
-    CliPanel(
-        borderColor = borderColor,
-        containerColor = CliSurface,
-        contentPadding = PaddingValues(18.dp)
-    ) {
-        // Section Header Row
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "CURRENTLY CONNECTED",
-                style = CliTypography.TelemetryLabel
-            )
-
-            if (status.isConnected) {
-                val bandColor = if (is5G) CliAccent5GHz else CliAccent24GHz
-                val bandBg = if (is5G) CliAccent5GHzBg else CliAccent24GHzBg
-                CliBadge(
-                    text = if (status.band != BandType.UNKNOWN) status.band.displayName else "WI-FI",
-                    accentColor = bandColor,
-                    backgroundColor = bandBg,
-                    borderColor = bandColor.copy(alpha = 0.4f)
-                )
-            } else if (isOperating) {
-                CliBadge(
-                    text = "STEERING...",
-                    accentColor = CliAccent5GHz,
-                    backgroundColor = CliAccent5GHzBg,
-                    borderColor = CliAccent5GHz.copy(alpha = 0.4f)
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        // SSID Title
-        Text(
-            text = if (status.isConnected && status.ssid.isNotEmpty()) status.ssid
-                   else if (status.isConnected) "Wi-Fi Connected"
-                   else if (isOperating) "Negotiating Band..."
-                   else "Not Connected",
-            style = Typography.headlineMedium,
-            color = CliTextPrimary
-        )
-
-        Text(
-            text = if (status.isConnected && status.ipAddress.isNotEmpty()) "IP: ${status.ipAddress}"
-                   else if (status.isConnected) "Connected • Wi-Fi details unavailable"
-                   else if (isOperating) "Binding to target AP & verifying DHCP..."
-                   else "Connect to Wi-Fi",
-            style = CliTypography.CodeMono,
-            color = CliTextTertiary
-        )
-
-        if (status.isConnected && status.nativeIdentityLimited) {
-            val hiddenFields = listOfNotNull(
-                "SSID".takeIf { status.ssid.isEmpty() },
-                "BSSID".takeIf { status.bssid.isEmpty() }
-            ).joinToString("/")
-            Text(
-                text = "Basic status • $hiddenFields not provided by Android",
-                style = CliTypography.CodeMono,
-                color = CliTextTertiary
-            )
-        }
-
-        if (isOperating) {
-            Spacer(modifier = Modifier.height(8.dp))
-            LinearProgressIndicator(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(2.dp)
-                    .clip(RoundedCornerShape(1.dp)),
-                color = CliAccent5GHz,
-                trackColor = CliSurfaceElevated
-            )
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Telemetry Grid
-        if (status.isConnected) {
-            CliPanel(
-                borderColor = CliBorderSubtle,
-                containerColor = CliSurfaceElevated,
-                contentPadding = PaddingValues(12.dp),
-                shape = RoundedCornerShape(4.dp)
-            ) {
-                BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-                    val isNarrow = maxWidth < 460.dp
-
-                    if (isNarrow) {
-                        Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Box(modifier = Modifier.weight(1f)) {
-                                    CliTelemetryMetric(
-                                        label = "SIGNAL",
-                                        content = { CliSignalBars(status.rssi, showDbmText = true) }
-                                    )
-                                }
-                                Box(modifier = Modifier.weight(1f)) {
-                                    CliTelemetryMetric(
-                                        label = "LINK SPEED",
-                                        value = "${status.linkSpeedMbps} Mbps"
-                                    )
-                                }
-                            }
-
-                            CliDivider(color = CliBorderSubtle)
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Box(modifier = Modifier.weight(1f)) {
-                                    CliTelemetryMetric(
-                                        label = "CHANNEL",
-                                        value = if (status.frequency > 0) {
-                                            "Ch ${AccessPointRadio.frequencyToChannel(status.frequency)} (${status.frequency} MHz)"
-                                        } else "--"
-                                    )
-                                }
-                                Box(modifier = Modifier.weight(1f)) {
-                                    CliTelemetryMetric(
-                                        label = "STANDARD",
-                                        value = status.standard.uppercase().ifEmpty { "Wi-Fi" }
-                                    )
-                                }
-                            }
-                        }
-                    } else {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            CliTelemetryMetric(
-                                label = "SIGNAL",
-                                content = { CliSignalBars(status.rssi, showDbmText = true) }
-                            )
-                            CliTelemetryMetric(
-                                label = "LINK SPEED",
-                                value = "${status.linkSpeedMbps} Mbps"
-                            )
-                            CliTelemetryMetric(
-                                label = "CHANNEL",
-                                value = if (status.frequency > 0) {
-                                    "Ch ${AccessPointRadio.frequencyToChannel(status.frequency)} (${status.frequency} MHz)"
-                                } else "--"
-                            )
-                            CliTelemetryMetric(
-                                label = "STANDARD",
-                                value = status.standard.uppercase().ifEmpty { "Wi-Fi" }
-                            )
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // BSSID Lock & Routing Card
-            CliPanel(
-                borderColor = CliBorderSubtle,
-                containerColor = CliSurfaceElevated,
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-                shape = RoundedCornerShape(4.dp)
-            ) {
-                // Top Row: Lock/Steer Status (Left) + Graph Quick-Launch (Right)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.weight(1f, fill = false)
-                    ) {
-                        val badgeText = when {
-                            status.isLockedToBssid -> "LOCKED TO BSSID"
-                            status.isPreferred5GHz -> "PREFERRED 5 GHz (ROAM ALLOWED)"
-                            status.isPreferred5GHzFallback -> "PREFERRED 5 GHz (FALLBACK ACTIVE)"
-                            else -> "ROUTER AUTO-STEER"
-                        }
-                        Icon(
-                            imageVector = if (status.isLockedToBssid || status.isPreferred5GHz || status.isPreferred5GHzFallback) Icons.Default.Lock else Icons.Default.LockOpen,
-                            contentDescription = null,
-                            tint = if (status.isSteeredOrLocked) lockAccent else CliTextTertiary,
-                            modifier = Modifier.size(13.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = badgeText,
-                            style = CliTypography.BadgeText,
-                            color = if (status.isSteeredOrLocked) lockAccent else CliTextSecondary
-                        )
-                    }
-
-                    if (onOpenGraph != null && status.isConnected) {
-                        CliBadge(
-                            text = "GRAPH ↗",
-                            accentColor = CliAccent5GHz,
-                            backgroundColor = CliAccent5GHzBg,
-                            borderColor = CliAccent5GHz.copy(alpha = 0.5f),
-                            modifier = Modifier.clickable { onOpenGraph() }
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-                if (status.isPreferred5GHz || status.isPreferred5GHzFallback) {
-                    Text(
-                        text = "5 GHz RECOVERY ≥ $recoveryThresholdRssi dBm",
-                        style = CliTypography.CodeMono,
-                        color = CliTextSecondary
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                }
-                CliDivider(color = CliBorderSubtle)
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // Bottom Row: Active BSSID
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "ACTIVE BSSID",
-                        style = CliTypography.TelemetryLabel
-                    )
-
-                    Text(
-                        text = if (status.bssid.isNotEmpty()) status.bssid else "Hidden (limited native status)",
-                        style = CliTypography.CodeMono,
-                        color = if (status.bssid.isNotEmpty()) CliTextSecondary else CliTextTertiary,
-                        fontSize = 11.5.sp
-                    )
-                }
-
-                if (status.isConnected && status.ssid.isNotEmpty() && onGetMacPolicy != null) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    CliDivider(color = CliBorderSubtle)
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "MAC IDENTITY",
-                            style = CliTypography.TelemetryLabel
-                        )
-
-                        val currentPolicy = onGetMacPolicy(status.ssid) ?: MacAddressPolicy.DEVICE
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(if (currentPolicy == MacAddressPolicy.DEVICE) CliAccent5GHzBg else CliSurface)
-                                .border(1.dp, if (currentPolicy == MacAddressPolicy.DEVICE) CliAccent5GHz.copy(alpha = 0.4f) else CliBorder, RoundedCornerShape(4.dp))
-                                .clickable { onToggleMacPolicy?.invoke(status.ssid) }
-                                .padding(horizontal = 8.dp, vertical = 3.dp)
-                        ) {
-                            Text(
-                                text = "${currentPolicy.displayName.uppercase()} ⇄",
-                                style = CliTypography.BadgeText,
-                                color = if (currentPolicy == MacAddressPolicy.DEVICE) CliAccent5GHz else CliTextSecondary
-                            )
-                        }
-                    }
-                }
-
-                if (status.isSteeredOrLocked || isWatchdogActive) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    CliDivider(color = CliBorderSubtle)
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "WATCHDOG",
-                            style = CliTypography.TelemetryLabel
-                        )
-
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(7.dp)
-                                    .clip(CircleShape)
-                                    .background(if (isWatchdogActive && status.isPreferred5GHzFallback) CliAccent24GHz else if (isWatchdogActive) CliAccentGreen else CliTextTertiary)
-                            )
-                            Text(
-                                text = when {
-                                    !isWatchdogActive -> "OFF"
-                                    status.isPreferred5GHzFallback -> "ON · 5 GHz recovery pending"
-                                    status.isLockedToBssid -> "ON · monitoring pin"
-                                    status.isPreferred5GHz -> "ON · monitoring 5 GHz"
-                                    else -> "ON · Auto on this network"
-                                },
-                                style = CliTypography.CodeMono,
-                                color = if (isWatchdogActive && status.isPreferred5GHzFallback) CliAccent24GHz else if (isWatchdogActive) CliAccentGreen else CliTextTertiary,
-                                fontSize = 11.5.sp
-                            )
-                        }
-                    }
-
-                    if (isWatchdogActive && batteryOptimizationExempt == false) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .defaultMinSize(minHeight = 44.dp)
-                                .clickable(role = androidx.compose.ui.semantics.Role.Button) {
-                                    onBatterySettings?.invoke()
-                                },
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "BATTERY OPTIMIZED · CONFIGURE",
-                                style = CliTypography.CodeMono,
-                                color = CliAccent24GHz
-                            )
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Primary Command Button
-            CliButton(
-                onClick = onToggleLock,
-                enabled = !isOperating,
-                loading = isOperating,
-                variant = if (isLocked) CliButtonVariant.Outlined else CliButtonVariant.Primary,
-                text = if (isOperating) "SWITCHING BAND..." else if (isLocked) "UNLOCK TO AUTO-ROAM" else "PREFER 5 GHz (ROAM ALLOWED)",
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
-    }
-}
-
-@Composable
-fun CliTelemetryMetric(
-    label: String,
-    value: String? = null,
-    content: (@Composable () -> Unit)? = null
-) {
-    Column(horizontalAlignment = Alignment.Start) {
-        Text(
-            text = label,
-            style = CliTypography.TelemetryLabel
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-        if (content != null) {
-            content()
-        } else if (value != null) {
-            Text(
-                text = value,
-                style = CliTypography.TelemetryValue
-            )
-        }
-    }
-}
-
-
-@Composable
-fun CliQuickTilePanel(
-    isTileAdded: Boolean,
-    onAddTile: () -> Unit,
-    onRemoveTile: () -> Unit
-) {
-    CliPanel(
-        containerColor = CliSurface,
-        contentPadding = PaddingValues(16.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = "QUICK SETTINGS TILE",
-                        style = CliTypography.TelemetryLabel
-                    )
-                    if (isTileAdded) {
-                        Spacer(modifier = Modifier.width(8.dp))
-                        CliBadge(
-                            text = "ACTIVE",
-                            accentColor = CliAccentGreen,
-                            backgroundColor = CliAccentGreenBg,
-                            borderColor = CliAccentGreen.copy(alpha = 0.5f)
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = if (isTileAdded)
-                        "Tile is active in Quick Settings. Pull down notification shade to toggle 5 GHz lock."
-                    else
-                        "Toggle 5 GHz lock directly from Android's notification shade with one tap.",
-                    style = Typography.bodyMedium,
-                    color = CliTextSecondary
-                )
-            }
-            Spacer(modifier = Modifier.width(14.dp))
-            if (isTileAdded) {
-                CliButton(
-                    text = "REMOVE",
-                    variant = CliButtonVariant.Ghost,
-                    onClick = onRemoveTile
-                )
-            } else {
-                CliButton(
-                    text = "ADD TILE",
-                    variant = CliButtonVariant.Outlined,
-                    onClick = onAddTile
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun CliRadioRow(
-    radio: AccessPointRadio,
-    isCurrent: Boolean,
-    isPinned: Boolean,
-    onLockClick: () -> Unit
-) {
-    val is5G = radio.band == BandType.BAND_5_GHZ || radio.band == BandType.BAND_6_GHZ
-    val bandColor = if (is5G) CliAccent5GHz else CliAccent24GHz
-    val bandBg = if (is5G) CliAccent5GHzBg else CliAccent24GHzBg
-
-    CliPanel(
-        borderColor = if (isCurrent) bandColor.copy(alpha = 0.5f) else CliBorder,
-        containerColor = CliSurface,
-        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    if (radio.ssid.isNotEmpty()) {
-                        Text(
-                            text = radio.ssid,
-                            style = CliTypography.CodeMono,
-                            color = CliTextPrimary,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false)
-                        )
-                    }
-                    if (isCurrent) {
-                        CliBadge(
-                            text = "ACTIVE",
-                            accentColor = CliAccentGreen,
-                            backgroundColor = CliAccentGreenBg,
-                            borderColor = CliAccentGreen.copy(alpha = 0.5f)
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.height(4.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    CliBadge(
-                        text = radio.band.displayName,
-                        accentColor = bandColor,
-                        backgroundColor = bandBg,
-                        borderColor = bandColor.copy(alpha = 0.4f)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Ch ${radio.channel} (${radio.frequency} MHz)",
-                        style = CliTypography.CodeMono,
-                        color = if (radio.ssid.isNotEmpty()) CliTextSecondary else CliTextPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                Spacer(modifier = Modifier.height(3.dp))
-                Text(
-                    text = radio.bssid,
-                    style = CliTypography.CodeMono,
-                    color = CliTextTertiary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            Spacer(modifier = Modifier.width(10.dp))
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                CliSignalBars(radio.rssi, showDbmText = true)
-
-                CliButton(
-                    text = when {
-                        isPinned -> "PINNED"
-                        isCurrent -> "CONNECTED"
-                        else -> "BIND"
-                    },
-                    variant = if (isPinned) CliButtonVariant.Ghost else CliButtonVariant.Outlined,
-                    enabled = !isPinned,
-                    onClick = onLockClick
-                )
-            }
-        }
-    }
 }

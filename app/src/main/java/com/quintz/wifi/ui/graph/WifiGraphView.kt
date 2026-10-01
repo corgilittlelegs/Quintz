@@ -25,6 +25,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.geometry.Offset
@@ -55,13 +56,95 @@ import kotlin.math.max
 import kotlin.math.min
 
 // Candidate AP color palette
-private val CandidatePalette = listOf(
+private val DarkCandidatePalette = listOf(
     Color(0xFFA78BFA), // Violet
     Color(0xFFF59E0B), // Industrial Amber
     Color(0xFF34D399), // Emerald
     Color(0xFFF472B6), // Pink
     Color(0xFF60A5FA)  // Blue
 )
+
+private val LightCandidatePalette = listOf(
+    Color(0xFF6D28D9), // Violet
+    Color(0xFF92400E), // Amber
+    Color(0xFF047857), // Emerald
+    Color(0xFFBE185D), // Pink
+    Color(0xFF1D4ED8)  // Blue
+)
+
+private fun candidateColor(index: Int, palette: CliPalette): Color {
+    val colors = if (palette == LightCliPalette) LightCandidatePalette else DarkCandidatePalette
+    return colors[index % colors.size]
+}
+
+private data class GraphSeries(
+    val visibleSamples: List<TelemetrySample>,
+    val candidates: List<Pair<String, List<com.quintz.wifi.telemetry.CandidateSample>>>
+)
+
+private data class GraphPaths(
+    val candidatePaths: List<Path>,
+    val activePath: Path,
+    val fillPath: Path,
+    val lastPoint: Offset?,
+    val lastStatusTimestamp: Long
+)
+
+private fun buildGraphPaths(series: GraphSeries, now: Long, width: Float, height: Float): GraphPaths {
+    val start = now - 60_000L
+    fun x(timestamp: Long) = ((timestamp - start).toFloat() / 60_000f).coerceIn(0f, 1f) * width
+    fun y(rssi: Int) = height * (1f - (rssi.toFloat().coerceIn(-95f, -30f) + 95f) / 65f)
+    val candidatePaths = series.candidates.map { (_, readings) ->
+        Path().apply {
+            var previous = 0L
+            readings.forEach { reading ->
+                if (reading.rssi in -110..-20) {
+                    if (previous == 0L || reading.observedAtMillis - previous > 20_000L) {
+                        moveTo(x(reading.observedAtMillis), y(reading.rssi))
+                    } else {
+                        lineTo(x(reading.observedAtMillis), y(reading.rssi))
+                    }
+                    previous = reading.observedAtMillis
+                }
+            }
+        }
+    }
+    val active = Path()
+    val fill = Path()
+    var lastPoint: Offset? = null
+    var lastTimestamp = 0L
+    series.visibleSamples.forEach { sample ->
+        if (sample.activeRssi in -110..-20) {
+            val point = Offset(x(sample.timestamp), y(sample.activeRssi))
+            if (lastPoint == null || sample.timestamp - lastTimestamp > 7_500L) {
+                lastPoint?.let { fill.lineTo(it.x, height); fill.close() }
+                active.moveTo(point.x, point.y)
+                fill.moveTo(point.x, height)
+                fill.lineTo(point.x, point.y)
+            } else {
+                active.lineTo(point.x, point.y)
+                fill.lineTo(point.x, point.y)
+            }
+            lastPoint = point
+            lastTimestamp = sample.timestamp
+        }
+    }
+    lastPoint?.let { fill.lineTo(it.x, height); fill.close() }
+    return GraphPaths(candidatePaths, active, fill, lastPoint, lastTimestamp)
+}
+
+private fun prepareGraphSeries(samples: List<TelemetrySample>, now: Long): GraphSeries {
+    val windowStart = now - 60_000L
+    val visible = samples.filter { it.timestamp in windowStart..now }
+    val candidates = visible.asSequence().flatMap { it.candidates.values.asSequence() }
+        .filter { it.observedAtMillis in windowStart..now }
+        .groupBy { it.bssid.lowercase() }
+        .toSortedMap()
+        .map { (bssid, readings) ->
+            bssid to readings.distinctBy { it.observedAtMillis }.sortedBy { it.observedAtMillis }
+        }
+    return GraphSeries(visible, candidates)
+}
 
 @Composable
 fun WifiGraphView(
@@ -74,14 +157,18 @@ fun WifiGraphView(
     modifier: Modifier = Modifier,
     isConnected: Boolean = true
 ) {
+    val palette = LocalCliPalette.current
     val textMeasurer = rememberTextMeasurer()
     val haptic = LocalHapticFeedback.current
-    val gridLabelStyle = remember {
-        TextStyle(color = CliTextTertiary.copy(alpha = 0.7f), fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+    val gridLabelStyle = remember(palette) {
+        TextStyle(color = palette.textTertiary, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
     }
     val gridLabels = remember(textMeasurer, gridLabelStyle) {
         listOf("-40 dBm", "-50 dBm", "-65 [GOOD]", "-75 [ROAM]", "-90 dBm", "-60s", "-30s", "NOW")
             .associateWith { textMeasurer.measure(it, gridLabelStyle) }
+    }
+    val graphSeries = remember(state.samples, state.nowTimestampMillis) {
+        prepareGraphSeries(state.samples, state.nowTimestampMillis)
     }
 
     CliPanel(
@@ -282,17 +369,22 @@ fun WifiGraphView(
                     )
                 }
             } else {
-                Canvas(modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 8.dp)) {
-                    drawTelemetryGraph(
-                        samples = state.samples,
-                        nowTimestampMillis = state.nowTimestampMillis,
-                        activeBssid = state.activeBssid,
-                        activeBand = state.activeBand,
-                        selectedCandidateBssid = state.selectedCandidateBssid?.lowercase(),
-                        textMeasurer = textMeasurer,
-                        gridLabels = gridLabels
-                    )
-                }
+                Spacer(modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 8.dp)
+                    .drawWithCache {
+                        val paths = buildGraphPaths(graphSeries, state.nowTimestampMillis, size.width, size.height)
+                        onDrawBehind {
+                            drawTelemetryGraph(
+                                series = graphSeries,
+                                paths = paths,
+                                nowTimestampMillis = state.nowTimestampMillis,
+                                activeBand = state.activeBand,
+                                selectedCandidateBssid = state.selectedCandidateBssid?.lowercase(),
+                                palette = palette,
+                                textMeasurer = textMeasurer,
+                                gridLabels = gridLabels
+                            )
+                        }
+                    })
             }
         }
 
@@ -369,11 +461,12 @@ private fun observationAgeSummary(state: TelemetryGraphState, now: Long): String
  * Draws the real-time RF graph on Compose Canvas.
  */
 private fun DrawScope.drawTelemetryGraph(
-    samples: List<TelemetrySample>,
+    series: GraphSeries,
+    paths: GraphPaths,
     nowTimestampMillis: Long,
-    activeBssid: String,
     activeBand: BandType,
     selectedCandidateBssid: String?,
+    palette: CliPalette,
     textMeasurer: TextMeasurer,
     gridLabels: Map<String, TextLayoutResult>
 ) {
@@ -393,7 +486,7 @@ private fun DrawScope.drawTelemetryGraph(
     }
 
     val windowStartMillis = nowTimestampMillis - 60_000L
-    val visibleSamples = samples.filter { it.timestamp in windowStartMillis..nowTimestampMillis }
+    val visibleSamples = series.visibleSamples
     fun timestampToX(timestamp: Long): Float =
         ((timestamp - windowStartMillis).toFloat() / 60_000f).coerceIn(0f, 1f) * canvasWidth
 
@@ -403,19 +496,19 @@ private fun DrawScope.drawTelemetryGraph(
 
     // Green zone (-30 to -65 dBm)
     drawRect(
-        color = CliAccentGreen.copy(alpha = 0.04f),
+        color = palette.accentGreen.copy(alpha = 0.04f),
         topLeft = Offset(0f, 0f),
         size = Size(canvasWidth, yMinus65)
     )
     // Amber zone (-65 to -75 dBm)
     drawRect(
-        color = CliAccent24GHz.copy(alpha = 0.04f),
+        color = palette.accent24GHz.copy(alpha = 0.04f),
         topLeft = Offset(0f, yMinus65),
         size = Size(canvasWidth, yMinus75 - yMinus65)
     )
     // Red zone (-75 to -95 dBm)
     drawRect(
-        color = CliAccentRed.copy(alpha = 0.04f),
+        color = palette.accentRed.copy(alpha = 0.04f),
         topLeft = Offset(0f, yMinus75),
         size = Size(canvasWidth, canvasHeight - yMinus75)
     )
@@ -427,9 +520,9 @@ private fun DrawScope.drawTelemetryGraph(
         val y = dbmToY(dbm)
         val isThreshold = dbm == -65f || dbm == -75f
         val lineColor = if (isThreshold) {
-            if (dbm == -65f) CliAccentGreen.copy(alpha = 0.35f) else CliAccent24GHz.copy(alpha = 0.35f)
+            if (dbm == -65f) palette.accentGreen.copy(alpha = 0.35f) else palette.accent24GHz.copy(alpha = 0.35f)
         } else {
-            CliBorderSubtle
+            palette.borderSubtle
         }
         val strokeWidth = if (isThreshold) 1.5f else 1f
 
@@ -443,43 +536,19 @@ private fun DrawScope.drawTelemetryGraph(
 
         val label = if (dbm == -65f) "-65 [GOOD]" else if (dbm == -75f) "-75 [ROAM]" else "${dbm.toInt()} dBm"
         val measured = gridLabels.getValue(label)
-        drawText(
-            textLayoutResult = measured,
-            topLeft = Offset(6f, y - measured.size.height - 2f)
-        )
+        drawText(textLayoutResult = measured, topLeft = Offset(6f, y - measured.size.height - 2f))
     }
 
     // 3. Draw Candidate AP Lines (Background/Secondary)
-    val candidateObservations = visibleSamples.flatMap { it.candidates.values }
-        .filter { it.observedAtMillis in windowStartMillis..nowTimestampMillis }
-        .groupBy { it.bssid.lowercase() }
-    candidateObservations.toSortedMap().entries.forEachIndexed { candIndex, (candidateKey, readings) ->
+    series.candidates.forEachIndexed { candIndex, (candidateKey, _) ->
         val candBssid = candidateKey
         val isHighlighted = selectedCandidateBssid == null || selectedCandidateBssid == candBssid
-        val candColor = CandidatePalette[candIndex % CandidatePalette.size]
+        val candColor = candidateColor(candIndex, palette)
         val alpha = if (isHighlighted) 0.65f else 0.15f
         val strokeWidth = if (selectedCandidateBssid == candBssid) 2.5f else 1.5f
 
-        val candPath = Path()
-        var hasStarted = false
-
-        var lastObservedAtMillis = 0L
-        readings.distinctBy { it.observedAtMillis }.sortedBy { it.observedAtMillis }.forEach { cand ->
-            if (cand.rssi in -110..-20) {
-                val x = timestampToX(cand.observedAtMillis)
-                val y = dbmToY(cand.rssi.toFloat())
-                if (!hasStarted || cand.observedAtMillis - lastObservedAtMillis > 20_000L) {
-                    candPath.moveTo(x, y)
-                    hasStarted = true
-                } else {
-                    candPath.lineTo(x, y)
-                }
-                lastObservedAtMillis = cand.observedAtMillis
-            }
-        }
-
         drawPath(
-            path = candPath,
+            path = paths.candidatePaths[candIndex],
             color = candColor.copy(alpha = alpha),
             style = Stroke(
                 width = strokeWidth,
@@ -493,7 +562,7 @@ private fun DrawScope.drawTelemetryGraph(
         sample.roamEvent?.let { roam ->
             val x = timestampToX(sample.timestamp)
             drawLine(
-                color = CliAccent5GHz,
+                color = palette.accent5GHz,
                 start = Offset(x, 0f),
                 end = Offset(x, canvasHeight),
                 strokeWidth = 2f,
@@ -501,64 +570,27 @@ private fun DrawScope.drawTelemetryGraph(
             )
 
             val tag = "ROAM [${roam.fromBand.displayName} → ${roam.toBand.displayName}]"
-            val measuredTag = textMeasurer.measure(
-                tag,
-                TextStyle(color = CliAccent5GHz, fontSize = 8.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-            )
+            val style = TextStyle(color = palette.accent5GHz, fontSize = 8.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+            val measuredTag = textMeasurer.measure(tag, style)
             drawText(
-                textMeasurer = textMeasurer,
-                text = tag,
-                topLeft = Offset(min(x + 4f, canvasWidth - measuredTag.size.width - 4f), 8f),
-                style = TextStyle(color = CliAccent5GHz, fontSize = 8.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                textLayoutResult = measuredTag,
+                topLeft = Offset(min(x + 4f, canvasWidth - measuredTag.size.width - 4f), 8f)
             )
         }
     }
 
     // 5. Draw Active AP Primary Curve & Gradient Fill
     val activeColor = if (activeBand == BandType.BAND_5_GHZ || activeBand == BandType.BAND_6_GHZ) {
-        CliAccent5GHz
+        palette.accent5GHz
     } else {
-        CliAccent24GHz
+        palette.accent24GHz
     }
 
-    val activePath = Path()
-    val fillPath = Path()
-    var activeStarted = false
-    var lastX = 0f
-    var lastY = 0f
-    var lastStatusTimestamp = 0L
-
-    for (sample in visibleSamples) {
-        val rssi = sample.activeRssi
-        if (rssi in -110..-20) {
-            val x = timestampToX(sample.timestamp)
-            val y = dbmToY(rssi.toFloat())
-            if (!activeStarted || sample.timestamp - lastStatusTimestamp > 7_500L) {
-                if (activeStarted) {
-                    fillPath.lineTo(lastX, canvasHeight)
-                    fillPath.close()
-                }
-                activePath.moveTo(x, y)
-                fillPath.moveTo(x, canvasHeight)
-                fillPath.lineTo(x, y)
-                activeStarted = true
-            } else {
-                activePath.lineTo(x, y)
-                fillPath.lineTo(x, y)
-            }
-            lastX = x
-            lastY = y
-            lastStatusTimestamp = sample.timestamp
-        }
-    }
-
-    if (activeStarted) {
-        fillPath.lineTo(lastX, canvasHeight)
-        fillPath.close()
+    if (paths.lastPoint != null) {
 
         // Subtle glowing gradient fill under curve
         drawPath(
-            path = fillPath,
+            path = paths.fillPath,
             brush = Brush.verticalGradient(
                 colors = listOf(activeColor.copy(alpha = 0.22f), activeColor.copy(alpha = 0.02f)),
                 startY = dbmToY(-40f),
@@ -568,22 +600,22 @@ private fun DrawScope.drawTelemetryGraph(
 
         // Bold active line
         drawPath(
-            path = activePath,
+            path = paths.activePath,
             color = activeColor,
             style = Stroke(width = 3.2f, cap = StrokeCap.Round, join = StrokeJoin.Round)
         )
 
         // Show a live marker only while the last measurement is recent.
-        if (nowTimestampMillis - lastStatusTimestamp in 0L..7_500L) {
+        if (nowTimestampMillis - paths.lastStatusTimestamp in 0L..7_500L) {
             drawCircle(
                 color = activeColor,
                 radius = 5.5f,
-                center = Offset(lastX, lastY)
+                center = paths.lastPoint
             )
             drawCircle(
                 color = Color.White,
                 radius = 2.5f,
-                center = Offset(lastX, lastY)
+                center = paths.lastPoint
             )
         }
     }
@@ -594,10 +626,7 @@ private fun DrawScope.drawTelemetryGraph(
         val x = timestampToX(timestamp)
         val measured = gridLabels.getValue(text)
         val drawX = (x - measured.size.width / 2f).coerceIn(4f, canvasWidth - measured.size.width - 4f)
-        drawText(
-            textLayoutResult = measured,
-            topLeft = Offset(drawX, canvasHeight - measured.size.height - 2f)
-        )
+        drawText(textLayoutResult = measured, topLeft = Offset(drawX, canvasHeight - measured.size.height - 2f))
     }
 }
 
@@ -613,7 +642,7 @@ private fun CandidateApCard(
     onLock: () -> Unit
 ) {
     val delta = candidate.latestRssi - activeRssi
-    val candColor = CandidatePalette[candidate.colorIndex % CandidatePalette.size]
+    val candColor = candidateColor(candidate.colorIndex, LocalCliPalette.current)
 
     val deltaText = if (delta > 0) "+$delta dBm" else "$delta dBm"
     val deltaColor = if (delta >= 6) CliAccentGreen else if (delta > 0) CliAccent24GHz else CliTextTertiary

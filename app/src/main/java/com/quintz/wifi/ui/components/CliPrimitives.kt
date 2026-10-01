@@ -336,11 +336,13 @@ fun CliFilterChip(
 @Composable
 fun CliScannerRefreshButton(
     isScanning: Boolean,
+    isQueued: Boolean,
     enabled: Boolean,
     onRefresh: () -> Unit,
     showLabel: Boolean = false,
     modifier: Modifier = Modifier
 ) {
+    val isBusy = isScanning || isQueued
     val haptic = LocalHapticFeedback.current
     val infiniteTransition = rememberInfiniteTransition(label = "scannerRefreshSpin")
     val rotation by infiniteTransition.animateFloat(
@@ -358,7 +360,7 @@ fun CliScannerRefreshButton(
             .clip(RoundedCornerShape(4.dp))
             .border(
                 1.dp,
-                if (isScanning) CliAccentGreen.copy(alpha = 0.6f) else CliBorder,
+                if (isBusy) CliAccentGreen.copy(alpha = 0.6f) else CliBorder,
                 RoundedCornerShape(4.dp)
             )
             .clickable(enabled = enabled) {
@@ -366,8 +368,8 @@ fun CliScannerRefreshButton(
                 onRefresh()
             },
         shape = RoundedCornerShape(4.dp),
-        color = if (isScanning) CliAccentGreenBg else CliSurfaceElevated,
-        contentColor = if (isScanning) CliAccentGreen else if (!enabled) CliTextTertiary else CliTextSecondary
+        color = if (isBusy) CliAccentGreenBg else CliSurfaceElevated,
+        contentColor = if (isBusy) CliAccentGreen else if (!enabled) CliTextTertiary else CliTextSecondary
     ) {
         Row(
             modifier = Modifier.padding(horizontal = if (showLabel) 8.dp else 6.dp, vertical = 4.dp),
@@ -376,17 +378,17 @@ fun CliScannerRefreshButton(
         ) {
             Icon(
                 imageVector = Icons.Default.Refresh,
-                contentDescription = "Scan Nearby Radios",
-                tint = if (isScanning) CliAccentGreen else if (!enabled) CliTextTertiary else CliTextSecondary,
+                contentDescription = if (isQueued) "Waiting to scan nearby radios" else if (isScanning) "Scanning nearby radios" else "Scan nearby radios",
+                tint = if (isBusy) CliAccentGreen else if (!enabled) CliTextTertiary else CliTextSecondary,
                 modifier = Modifier
                     .size(12.dp)
                     .then(if (isScanning) Modifier.rotate(rotation) else Modifier)
             )
             if (showLabel) {
                 Text(
-                    text = if (isScanning) "SCANNING" else "SCAN",
+                    text = if (isQueued) "WAITING" else if (isScanning) "SCANNING" else "SCAN",
                     style = CliTypography.BadgeText,
-                    color = if (isScanning) CliAccentGreen else if (!enabled) CliTextTertiary else CliTextSecondary
+                    color = if (isBusy) CliAccentGreen else if (!enabled) CliTextTertiary else CliTextSecondary
                 )
             }
         }
