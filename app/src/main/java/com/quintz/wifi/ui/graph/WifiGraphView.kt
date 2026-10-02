@@ -734,16 +734,16 @@ private fun DrawScope.drawTelemetryGraph(
     if (animatedPoint != null && nowTimestampMillis - paths.lastStatusTimestamp in 0L..7_500L) {
         val lastBand = series.visibleSamples.lastOrNull()?.activeBand
         val activeColor = if (lastBand == BandType.BAND_5_GHZ || lastBand == BandType.BAND_6_GHZ) palette.accent5GHz else palette.accent24GHz
-            drawCircle(
-                color = activeColor,
-                radius = 5.5f,
-                center = animatedPoint
-            )
-            drawCircle(
-                color = Color.White,
-                radius = 2.5f,
-                center = animatedPoint
-            )
+        drawCircle(
+            color = activeColor,
+            radius = 5.5f,
+            center = animatedPoint
+        )
+        drawCircle(
+            color = Color.White,
+            radius = 2.5f,
+            center = animatedPoint
+        )
     }
 
       }
