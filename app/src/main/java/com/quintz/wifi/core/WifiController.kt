@@ -70,7 +70,10 @@ class WifiController(private val context: Context) {
             @Suppress("DEPRECATION")
             val wmInfo = wm?.connectionInfo
             val capsWifiInfo = caps.transportInfo as? WifiInfo
-            val wifiInfo = capsWifiInfo ?: wmInfo
+            // WifiManager can retain permitted identity fields which transportInfo redacts.
+            val wifiInfo = wmInfo?.takeIf {
+                !it.bssid.isNullOrEmpty() && it.bssid != "02:00:00:00:00:00"
+            } ?: capsWifiInfo ?: wmInfo
 
             val freq = wifiInfo?.frequency ?: 0
             val speed = wifiInfo?.linkSpeed ?: 0
@@ -109,6 +112,7 @@ class WifiController(private val context: Context) {
                 linkSpeedMbps = speed,
                 standard = standard,
                 ipAddress = ipAddress,
+                networkId = wifiInfo?.networkId?.takeIf { it >= 0 },
                 nativeIdentityLimited = ssid.isEmpty() || bssid.isEmpty()
             )
         } catch (_: Exception) {

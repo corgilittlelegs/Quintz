@@ -17,6 +17,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.text.KeyboardActions
@@ -296,7 +297,7 @@ fun MainScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -425,6 +426,9 @@ fun MainScreen(
             val isWideScreen = maxWidth >= 760.dp
             LaunchedEffect(isWideScreen, selectedRightPane, selectedPhoneTab) {
                 viewModel.setScannerActive(isWideScreen || selectedPhoneTab != PhoneTab.CONTROLS)
+                viewModel.setTelemetryActive(
+                    if (isWideScreen) selectedRightPane == RightPaneView.GRAPH else selectedPhoneTab == PhoneTab.GRAPH
+                )
             }
 
             if (isWideScreen) {
@@ -603,24 +607,38 @@ fun MainScreen(
                                             }
                                         }
                                     } else {
-                                        LazyColumn(
-                                            modifier = Modifier.fillMaxSize(),
-                                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .verticalScroll(rememberScrollState())
                                         ) {
-                                            items(filteredRadios) { radio ->
-                                                val isCurrent = wifiStatus.isConnected && radio.bssid.equals(wifiStatus.bssid, ignoreCase = true)
-                                                CliRadioRow(
-                                                    radio = radio,
-                                                    isCurrent = isCurrent,
-                                                    isPinned = wifiStatus.isLockedToBssid && wifiStatus.lockedBssid?.equals(radio.bssid, ignoreCase = true) == true,
-                                                    onLockClick = {
-                                                        requestRadioBind(radio, "main_screen_wide_radio_lock")
+                                            CliPanel(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                containerColor = CliSurface,
+                                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                                            ) {
+                                                Column(modifier = Modifier.fillMaxWidth()) {
+                                                    filteredRadios.forEachIndexed { index, radio ->
+                                                        if (index > 0) {
+                                                            CliDivider(color = CliBorderSubtle)
+                                                        }
+                                                        val isCurrent = wifiStatus.isConnected && radio.bssid.equals(wifiStatus.bssid, ignoreCase = true)
+                                                        CliRadioRow(
+                                                            radio = radio,
+                                                            isCurrent = isCurrent,
+                                                            isPinned = wifiStatus.isLockedToBssid && wifiStatus.lockedBssid?.equals(radio.bssid, ignoreCase = true) == true,
+                                                            onLockClick = {
+                                                                requestRadioBind(radio, "main_screen_wide_radio_lock")
+                                                            },
+                                                            onUnpinClick = { viewModel.unlockToAuto("main_screen_wide_radio_unpin") },
+
+                                                            isOperating = isOperating,
+                                                            asCard = false
+                                                        )
                                                     }
-                                                )
+                                                }
                                             }
-                                            item {
-                                                Spacer(modifier = Modifier.height(16.dp))
-                                            }
+                                            Spacer(modifier = Modifier.height(16.dp))
                                         }
                                     }
                                 }
@@ -641,7 +659,7 @@ fun MainScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(start = 16.dp, end = 16.dp, bottom = 16.dp)
+                        .padding(start = 8.dp, end = 8.dp, bottom = 12.dp)
                 ) {
                     Spacer(modifier = Modifier.height(8.dp))
 
@@ -762,58 +780,65 @@ fun MainScreen(
                             }
 
                             PhoneTab.SCANNER -> {
-                                Column(modifier = Modifier.fillMaxSize()) {
-                                    Row(
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .verticalScroll(rememberScrollState())
+                                ) {
+                                    CliPanel(
                                         modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
+                                        containerColor = CliSurface,
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 14.dp)
                                     ) {
-                                        Text(
-                                            text = "DETECTED RADIOS",
-                                            style = CliTypography.TelemetryLabel,
-                                            modifier = Modifier.padding(end = 6.dp)
-                                        )
-
                                         Row(
-                                            modifier = Modifier.horizontalScroll(rememberScrollState()),
-                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            CliFilterChip(
-                                                label = "ALL",
-                                                isSelected = selectedFilter == RadioFilter.ALL,
-                                                onClick = { selectedFilter = RadioFilter.ALL }
+                                            Text(
+                                                text = "DETECTED RADIOS (${radios.size})",
+                                                style = CliTypography.TelemetryLabel,
+                                                modifier = Modifier.padding(end = 6.dp)
                                             )
-                                            CliFilterChip(
-                                                label = "5 GHz",
-                                                isSelected = selectedFilter == RadioFilter.BAND_5G,
-                                                onClick = { selectedFilter = RadioFilter.BAND_5G }
-                                            )
-                                            CliFilterChip(
-                                                label = "2.4 GHz",
-                                                isSelected = selectedFilter == RadioFilter.BAND_24G,
-                                                onClick = { selectedFilter = RadioFilter.BAND_24G }
-                                            )
-                                            CliScannerRefreshButton(
-                                                isScanning = isScanning,
-                                                isQueued = isScanQueued,
-                                                enabled = !isOperating && !isScanning && !isScanQueued && shizukuState.isPermissionGranted,
-                                                onRefresh = { viewModel.refreshAll() },
-                                                showLabel = false
-                                            )
+
+                                            Row(
+                                                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                CliFilterChip(
+                                                    label = "ALL",
+                                                    isSelected = selectedFilter == RadioFilter.ALL,
+                                                    onClick = { selectedFilter = RadioFilter.ALL }
+                                                )
+                                                CliFilterChip(
+                                                    label = "5 GHz",
+                                                    isSelected = selectedFilter == RadioFilter.BAND_5G,
+                                                    onClick = { selectedFilter = RadioFilter.BAND_5G }
+                                                )
+                                                CliFilterChip(
+                                                    label = "2.4 GHz",
+                                                    isSelected = selectedFilter == RadioFilter.BAND_24G,
+                                                    onClick = { selectedFilter = RadioFilter.BAND_24G }
+                                                )
+                                                CliScannerRefreshButton(
+                                                    isScanning = isScanning,
+                                                    isQueued = isScanQueued,
+                                                    enabled = !isOperating && !isScanning && !isScanQueued && shizukuState.isPermissionGranted,
+                                                    onRefresh = { viewModel.refreshAll() },
+                                                    showLabel = false
+                                                )
+                                            }
                                         }
-                                    }
 
-                                    Spacer(modifier = Modifier.height(10.dp))
+                                        Spacer(modifier = Modifier.height(10.dp))
+                                        CliDivider(color = CliBorderSubtle)
 
-                                    if (filteredRadios.isEmpty()) {
-                                        CliPanel(
-                                            containerColor = CliSurface,
-                                            contentPadding = PaddingValues(24.dp),
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
+                                        if (filteredRadios.isEmpty()) {
                                             Box(
-                                                modifier = Modifier.fillMaxWidth(),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(vertical = 24.dp),
                                                 contentAlignment = Alignment.Center
                                             ) {
                                                 Text(
@@ -825,28 +850,31 @@ fun MainScreen(
                                                     color = CliTextTertiary
                                                 )
                                             }
-                                        }
-                                    } else {
-                                        LazyColumn(
-                                            modifier = Modifier.fillMaxSize(),
-                                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                                        ) {
-                                            items(filteredRadios) { radio ->
-                                                val isCurrent = wifiStatus.isConnected && radio.bssid.equals(wifiStatus.bssid, ignoreCase = true)
-                                                CliRadioRow(
-                                                    radio = radio,
-                                                    isCurrent = isCurrent,
-                                                    isPinned = wifiStatus.isLockedToBssid && wifiStatus.lockedBssid?.equals(radio.bssid, ignoreCase = true) == true,
-                                                    onLockClick = {
-                                                        requestRadioBind(radio, "main_screen_controls_radio_lock")
+                                        } else {
+                                            Column(modifier = Modifier.fillMaxWidth()) {
+                                                filteredRadios.forEachIndexed { index, radio ->
+                                                    if (index > 0) {
+                                                        CliDivider(color = CliBorderSubtle)
                                                     }
-                                                )
-                                            }
-                                            item {
-                                                Spacer(modifier = Modifier.height(24.dp))
+                                                    val isCurrent = wifiStatus.isConnected && radio.bssid.equals(wifiStatus.bssid, ignoreCase = true)
+                                                    CliRadioRow(
+                                                        radio = radio,
+                                                        isCurrent = isCurrent,
+                                                        isPinned = wifiStatus.isLockedToBssid && wifiStatus.lockedBssid?.equals(radio.bssid, ignoreCase = true) == true,
+                                                        onLockClick = {
+                                                            requestRadioBind(radio, "main_screen_controls_radio_lock")
+                                                        },
+                                                        onUnpinClick = { viewModel.unlockToAuto("main_screen_controls_radio_unpin") },
+
+                                                        isOperating = isOperating,
+                                                        asCard = false
+                                                    )
+                                                }
                                             }
                                         }
                                     }
+
+                                    Spacer(modifier = Modifier.height(16.dp))
                                 }
                             }
 

@@ -53,7 +53,7 @@ fun CliConnectedHeroPanel(
     CliPanel(
         borderColor = borderColor,
         containerColor = CliSurface,
-        contentPadding = PaddingValues(18.dp)
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 14.dp)
     ) {
         // Section Header Row
         Row(
@@ -137,7 +137,7 @@ fun CliConnectedHeroPanel(
             CliPanel(
                 borderColor = CliBorderSubtle,
                 containerColor = CliSurfaceElevated,
-                contentPadding = PaddingValues(12.dp),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
                 shape = RoundedCornerShape(4.dp)
             ) {
                 BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
@@ -222,7 +222,7 @@ fun CliConnectedHeroPanel(
             CliPanel(
                 borderColor = CliBorderSubtle,
                 containerColor = CliSurfaceElevated,
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                 shape = RoundedCornerShape(4.dp)
             ) {
                 // Top Row: Lock/Steer Status (Left) + Graph Quick-Launch (Right)

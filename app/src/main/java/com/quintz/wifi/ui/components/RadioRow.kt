@@ -1,6 +1,9 @@
 package com.quintz.wifi.ui.components
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -19,111 +22,128 @@ fun CliRadioRow(
     radio: AccessPointRadio,
     isCurrent: Boolean,
     isPinned: Boolean,
-    onLockClick: () -> Unit
+    onLockClick: () -> Unit,
+    onUnpinClick: () -> Unit,
+    isOperating: Boolean,
+    modifier: Modifier = Modifier,
+    asCard: Boolean = false
 ) {
     val is5G = radio.band == BandType.BAND_5_GHZ || radio.band == BandType.BAND_6_GHZ
     val bandColor = if (is5G) CliAccent5GHz else CliAccent24GHz
     val bandBg = if (is5G) CliAccent5GHzBg else CliAccent24GHzBg
 
-    CliPanel(
-        borderColor = if (isCurrent) bandColor.copy(alpha = 0.5f) else CliBorder,
-        containerColor = CliSurface,
-        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
-    ) {
-        // Row 1: Network Name, Active Badge & Signal Strength
+    val rowContent = @Composable {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.weight(1f, fill = false).padding(end = 8.dp)
+            // Left Column: Network Name, Band/Channel & BSSID
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 10.dp)
             ) {
-                Text(
-                    text = radio.ssid.ifEmpty { "(Hidden Network)" },
-                    style = CliTypography.CodeMono,
-                    color = CliTextPrimary,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                if (isCurrent) {
-                    CliBadge(
-                        text = "ACTIVE",
-                        accentColor = CliAccentGreen,
-                        backgroundColor = CliAccentGreenBg,
-                        borderColor = CliAccentGreen.copy(alpha = 0.5f)
+                // Line 1: Network Name & Active/Pinned Badge
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = radio.ssid.ifEmpty { "(Hidden Network)" },
+                        style = CliTypography.CodeMono,
+                        color = CliTextPrimary,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
-                } else if (isPinned) {
-                    CliBadge(
-                        text = "PINNED",
-                        accentColor = CliAccent5GHz,
-                        backgroundColor = CliAccent5GHzBg,
-                        borderColor = CliAccent5GHz.copy(alpha = 0.5f)
-                    )
+                    if (isCurrent) {
+                        CliBadge(
+                            text = "ACTIVE",
+                            accentColor = CliAccentGreen,
+                            backgroundColor = CliAccentGreenBg,
+                            borderColor = CliAccentGreen.copy(alpha = 0.5f)
+                        )
+                    }
+                    if (isPinned) {
+                        CliBadge(
+                            text = "PINNED",
+                            accentColor = CliAccent5GHz,
+                            backgroundColor = CliAccent5GHzBg,
+                            borderColor = CliAccent5GHz.copy(alpha = 0.5f)
+                        )
+                    }
                 }
-            }
 
-            CliSignalBars(radio.rssi, showDbmText = true)
-        }
+                Spacer(modifier = Modifier.height(5.dp))
 
-        Spacer(modifier = Modifier.height(6.dp))
-
-        // Row 2: Band & Channel Details + Action Button
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f).padding(end = 8.dp)
-            ) {
+                // Line 2: Band Details
                 CliBadge(
                     text = radio.band.displayName,
                     accentColor = bandColor,
                     backgroundColor = bandBg,
                     borderColor = bandColor.copy(alpha = 0.4f)
                 )
-                Spacer(modifier = Modifier.width(8.dp))
+
+                Spacer(modifier = Modifier.height(5.dp))
+
+                // Line 3: Channel Info before Hardware BSSID / MAC Address
+                val channelPrefix = if (radio.channel > 0) "Ch ${radio.channel} · " else ""
                 Text(
-                    text = "Ch ${radio.channel} (${radio.frequency} MHz)",
+                    text = "$channelPrefix${radio.bssid}",
                     style = CliTypography.CodeMono,
-                    color = if (radio.ssid.isNotEmpty()) CliTextSecondary else CliTextPrimary,
+                    color = CliTextTertiary,
+                    fontSize = 11.5.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
 
-            if (!isCurrent && !isPinned) {
+            // Right Row: Signal Bars & Action Button Side-by-Side
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                CliSignalBars(radio.rssi, showDbmText = true)
+
                 CliButton(
-                    text = "BIND",
+                    text = when {
+                        isPinned -> "UNPIN"
+                        isCurrent -> "PIN"
+                        else -> "BIND"
+                    },
                     size = CliButtonSize.Compact,
                     variant = CliButtonVariant.Outlined,
-                    onClick = onLockClick
-                )
-            } else if (isCurrent) {
-                CliBadge(
-                    text = "CONNECTED",
-                    accentColor = bandColor,
-                    backgroundColor = bandBg,
-                    borderColor = bandColor.copy(alpha = 0.4f)
+                    enabled = !isOperating,
+                    onClick = if (isPinned) onUnpinClick else onLockClick
                 )
             }
         }
+    }
 
-        Spacer(modifier = Modifier.height(4.dp))
-
-        // Row 3: Hardware BSSID
-        Text(
-            text = radio.bssid,
-            style = CliTypography.CodeMono,
-            color = CliTextTertiary,
-            fontSize = 11.5.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
+    if (asCard) {
+        CliPanel(
+            borderColor = if (isCurrent) bandColor.copy(alpha = 0.5f) else CliBorder,
+            containerColor = CliSurface,
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+            modifier = modifier
+        ) {
+            rowContent()
+        }
+    } else {
+        Column(
+            modifier = modifier
+                .fillMaxWidth()
+                .then(
+                    if (isCurrent) Modifier
+                        .background(bandBg.copy(alpha = 0.25f), RoundedCornerShape(4.dp))
+                        .border(1.dp, bandColor.copy(alpha = 0.35f), RoundedCornerShape(4.dp))
+                    else Modifier
+                )
+                .padding(horizontal = 6.dp, vertical = 8.dp)
+        ) {
+            rowContent()
+        }
     }
 }

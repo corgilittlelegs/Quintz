@@ -28,7 +28,7 @@ fun CliShizukuPanel(
     CliPanel(
         containerColor = cardBgColor,
         borderColor = cardBorderColor,
-        contentPadding = PaddingValues(16.dp)
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),

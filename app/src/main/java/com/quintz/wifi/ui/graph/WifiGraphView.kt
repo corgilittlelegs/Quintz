@@ -3,7 +3,6 @@ package com.quintz.wifi.ui.graph
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -16,7 +15,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DeleteSweep
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
@@ -34,6 +32,9 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.drawscope.clipRect
+import com.quintz.wifi.telemetry.startsNewTelemetrySegment
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
@@ -87,12 +88,13 @@ private data class GraphPaths(
     val candidatePoints: List<List<Offset>>,
     val activeSegments: List<ActiveSegment>,
     val lastPoint: Offset?,
-    val lastStatusTimestamp: Long
+    val lastStatusTimestamp: Long,
+    val roamLabels: List<Pair<Long, TextLayoutResult>>
 )
 
-private data class ActiveSegment(val band: BandType, val line: Path, val fill: Path)
+private data class ActiveSegment(val band: BandType, val line: Path, val fill: Path, val color: Color, val fillBrush: Brush)
 
-private fun buildGraphPaths(series: GraphSeries, now: Long, width: Float, height: Float): GraphPaths {
+private fun buildGraphPaths(series: GraphSeries, now: Long, width: Float, height: Float, palette: CliPalette, textMeasurer: TextMeasurer): GraphPaths {
     val start = now - 60_000L
     fun x(timestamp: Long) = ((timestamp - start).toFloat() / 60_000f).coerceIn(0f, 1f) * width
     fun y(rssi: Int) = height * (1f - (rssi.toFloat().coerceIn(-95f, -30f) + 95f) / 65f)
@@ -106,17 +108,21 @@ private fun buildGraphPaths(series: GraphSeries, now: Long, width: Float, height
     var segmentBand = BandType.UNKNOWN
     var lastPoint: Offset? = null
     var lastTimestamp = 0L
+    var previousSample: TelemetrySample? = null
     fun finishSegment() {
         lastPoint?.let {
             fill.lineTo(it.x, height)
             fill.close()
-            segments.add(ActiveSegment(segmentBand, active, fill))
+            val color = if (segmentBand == BandType.BAND_5_GHZ || segmentBand == BandType.BAND_6_GHZ) palette.accent5GHz else palette.accent24GHz
+            segments.add(ActiveSegment(segmentBand, active, fill, color, Brush.verticalGradient(
+                colors = listOf(color.copy(alpha = 0.22f), color.copy(alpha = 0.02f)),
+                startY = height * (1f - 55f / 65f), endY = height)))
         }
     }
     series.visibleSamples.forEach { sample ->
         if (sample.activeRssi in -110..-20) {
             val point = Offset(x(sample.timestamp), y(sample.activeRssi))
-            if (lastPoint == null || sample.timestamp - lastTimestamp > 7_500L || sample.activeBand != segmentBand) {
+            if (lastPoint == null || startsNewTelemetrySegment(previousSample, sample)) {
                 finishSegment()
                 active = Path()
                 fill = Path()
@@ -125,15 +131,23 @@ private fun buildGraphPaths(series: GraphSeries, now: Long, width: Float, height
                 fill.moveTo(point.x, height)
                 fill.lineTo(point.x, point.y)
             } else {
-                active.lineTo(point.x, point.y)
-                fill.lineTo(point.x, point.y)
+                val previous = lastPoint!!
+                val middleX = (previous.x + point.x) / 2f
+                active.cubicTo(middleX, previous.y, middleX, point.y, point.x, point.y)
+                fill.cubicTo(middleX, previous.y, middleX, point.y, point.x, point.y)
             }
             lastPoint = point
             lastTimestamp = sample.timestamp
+            previousSample = sample
         }
     }
     finishSegment()
-    return GraphPaths(candidatePoints, segments, lastPoint, lastTimestamp)
+    val roamStyle = TextStyle(color = palette.accent5GHz, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+    val roamLabels = series.visibleSamples.mapNotNull { sample ->
+        sample.roamEvent?.let { roam -> sample.timestamp to textMeasurer.measure(
+            "ROAM [${roam.fromBand.displayName} → ${roam.toBand.displayName}]", roamStyle) }
+    }
+    return GraphPaths(candidatePoints, segments, lastPoint, lastTimestamp, roamLabels)
 }
 
 private fun prepareGraphSeries(samples: List<TelemetrySample>, now: Long, liveBssids: Set<String>): GraphSeries {
@@ -170,6 +184,17 @@ fun WifiGraphView(
         listOf("-40 dBm", "-50 dBm", "-65 [GOOD]", "-75 [ROAM]", "-90 dBm", "-60s", "-30s", "NOW")
             .associateWith { textMeasurer.measure(it, gridLabelStyle) }
     }
+    // Read the frame clock only in drawing: the cards and layout do not recompose per frame.
+    val frameNow = remember { mutableLongStateOf(state.nowTimestampMillis) }
+    LaunchedEffect(state.isPaused, isConnected) {
+        if (!state.isPaused && isConnected) {
+            val wallStart = System.currentTimeMillis()
+            val frameStart = withFrameNanos { it }
+            while (true) {
+                withFrameNanos { frameNow.longValue = wallStart + (it - frameStart) / 1_000_000L }
+            }
+        }
+    }
     val graphSeries = remember(state.samples, state.nowTimestampMillis, state.candidates) {
         prepareGraphSeries(state.samples, state.nowTimestampMillis, state.candidates.map { it.bssid.lowercase() }.toSet())
     }
@@ -177,7 +202,7 @@ fun WifiGraphView(
     CliPanel(
         modifier = modifier.fillMaxSize(),
         containerColor = CliSurface,
-        contentPadding = PaddingValues(16.dp),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 14.dp),
         scrollState = scrollState
     ) {
         // ── 1. Header Bar: Title, Live Telemetry Status & Controls ──
@@ -379,15 +404,15 @@ fun WifiGraphView(
             } else {
                 Spacer(modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 8.dp)
                     .drawWithCache {
-                        val paths = buildGraphPaths(graphSeries, state.nowTimestampMillis, size.width, size.height)
+                        val paths = buildGraphPaths(graphSeries, state.nowTimestampMillis, size.width, size.height, palette, textMeasurer)
                         onDrawBehind {
                             drawTelemetryGraph(
                                 series = graphSeries,
                                 paths = paths,
-                                nowTimestampMillis = state.nowTimestampMillis,
+                                referenceTimestampMillis = state.nowTimestampMillis,
+                                nowTimestampMillis = if (state.isPaused) state.nowTimestampMillis else frameNow.longValue,
                                 selectedCandidateBssid = state.selectedCandidateBssid?.lowercase(),
                                 palette = palette,
-                                textMeasurer = textMeasurer,
                                 gridLabels = gridLabels
                             )
                         }
@@ -396,7 +421,7 @@ fun WifiGraphView(
         }
 
         Spacer(modifier = Modifier.height(12.dp))
-        LinkSpeedHistory(graphSeries.visibleSamples, state.nowTimestampMillis, palette)
+        LinkSpeedHistory(graphSeries.visibleSamples, state.nowTimestampMillis, frameNow, state.isPaused, palette)
 
         Spacer(modifier = Modifier.height(16.dp))
 
@@ -460,49 +485,53 @@ private fun ObservationAgeText(state: TelemetryGraphState, ageClock: StateFlow<L
 }
 
 @Composable
-private fun LinkSpeedHistory(samples: List<TelemetrySample>, now: Long, palette: CliPalette) {
+private fun LinkSpeedHistory(samples: List<TelemetrySample>, now: Long, frameNow: State<Long>, paused: Boolean, palette: CliPalette) {
     val readings = remember(samples, now) {
         samples.filter { it.timestamp in (now - 60_000L)..now && it.activeLinkSpeedMbps > 0 }
     }
     val scaleMbps = maxOf(100, ((readings.maxOfOrNull { it.activeLinkSpeedMbps } ?: 0) / 100 + 1) * 100)
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(text = "PHY LINK SPEED · LAST 60s", style = CliTypography.TelemetryLabel)
-        Canvas(
+        Spacer(
             modifier = Modifier.fillMaxWidth().height(100.dp)
                 .clip(RoundedCornerShape(6.dp))
                 .background(CliBackground)
                 .border(1.dp, CliBorder, RoundedCornerShape(6.dp))
                 .padding(8.dp)
-        ) {
-            val baseline = size.height
-            drawLine(palette.borderSubtle, Offset(0f, baseline), Offset(size.width, baseline), 1f)
-            drawLine(palette.borderSubtle, Offset(0f, baseline / 2f), Offset(size.width, baseline / 2f), 1f)
-            val path = Path()
-            var previousTimestamp = 0L
-            readings.forEach { reading ->
-                val point = Offset(
-                    ((reading.timestamp - (now - 60_000L)).toFloat() / 60_000f).coerceIn(0f, 1f) * size.width,
-                    baseline * (1f - reading.activeLinkSpeedMbps.toFloat().coerceIn(0f, scaleMbps.toFloat()) / scaleMbps)
-                )
-                if (previousTimestamp == 0L || reading.timestamp - previousTimestamp > 7_500L) {
-                    path.moveTo(point.x, point.y)
-                } else {
-                    path.lineTo(point.x, point.y)
+                .drawWithCache {
+                    val baseline = size.height
+                    val path = Path()
+                    var previous: TelemetrySample? = null
+                    var lastPoint: Offset? = null
+                    readings.forEach { reading ->
+                        val point = Offset(
+                            (reading.timestamp - (now - 60_000L)).toFloat() / 60_000f * size.width,
+                            baseline * (1f - reading.activeLinkSpeedMbps.toFloat().coerceIn(0f, scaleMbps.toFloat()) / scaleMbps)
+                        )
+                        if (startsNewTelemetrySegment(previous, reading)) {
+                            path.moveTo(point.x, point.y)
+                        } else {
+                            val middleX = (lastPoint!!.x + point.x) / 2f
+                            path.cubicTo(middleX, lastPoint!!.y, middleX, point.y, point.x, point.y)
+                        }
+                        previous = reading
+                        lastPoint = point
+                    }
+                    onDrawBehind {
+                        val liveNow = if (paused) now else frameNow.value
+                        drawLine(palette.borderSubtle, Offset(0f, baseline), Offset(size.width, baseline), 1f)
+                        drawLine(palette.borderSubtle, Offset(0f, baseline / 2f), Offset(size.width, baseline / 2f), 1f)
+                        clipRect {
+                            translate(left = -(liveNow - now).toFloat() / 60_000f * size.width) {
+                                drawPath(path, color = palette.accent5GHz, style = Stroke(width = 2.5f, cap = StrokeCap.Round))
+                                if (lastPoint != null && liveNow - (previous?.timestamp ?: 0L) in 0L..7_500L) {
+                                    drawCircle(palette.accent5GHz, radius = 4f, center = lastPoint!!)
+                                }
+                            }
+                        }
+                    }
                 }
-                previousTimestamp = reading.timestamp
-            }
-            drawPath(path, color = palette.accent5GHz, style = Stroke(width = 2.5f, cap = StrokeCap.Round))
-            readings.lastOrNull()?.takeIf { now - it.timestamp in 0L..7_500L }?.let { last ->
-                drawCircle(
-                    color = palette.accent5GHz,
-                    radius = 4f,
-                    center = Offset(
-                        ((last.timestamp - (now - 60_000L)).toFloat() / 60_000f).coerceIn(0f, 1f) * size.width,
-                        baseline * (1f - last.activeLinkSpeedMbps.toFloat().coerceIn(0f, scaleMbps.toFloat()) / scaleMbps)
-                    )
-                )
-            }
-        }
+        )
         Text(text = "0–$scaleMbps Mbps · PHY rate, not internet throughput", style = CliTypography.CodeMono, color = CliTextTertiary)
     }
 }
@@ -524,10 +553,10 @@ private fun observationAgeSummary(state: TelemetryGraphState, now: Long): String
 private fun DrawScope.drawTelemetryGraph(
     series: GraphSeries,
     paths: GraphPaths,
+    referenceTimestampMillis: Long,
     nowTimestampMillis: Long,
     selectedCandidateBssid: String?,
     palette: CliPalette,
-    textMeasurer: TextMeasurer,
     gridLabels: Map<String, TextLayoutResult>
 ) {
     val canvasWidth = size.width
@@ -546,7 +575,6 @@ private fun DrawScope.drawTelemetryGraph(
     }
 
     val windowStartMillis = nowTimestampMillis - 60_000L
-    val visibleSamples = series.visibleSamples
     fun timestampToX(timestamp: Long): Float =
         ((timestamp - windowStartMillis).toFloat() / 60_000f).coerceIn(0f, 1f) * canvasWidth
 
@@ -599,6 +627,8 @@ private fun DrawScope.drawTelemetryGraph(
         drawText(textLayoutResult = measured, topLeft = Offset(6f, y - measured.size.height - 2f))
     }
 
+    clipRect {
+      translate(left = -(nowTimestampMillis - referenceTimestampMillis).toFloat() / 60_000f * canvasWidth) {
     // Scan readings are discrete observations; drawing a line would imply continuous RF data.
     series.candidates.forEachIndexed { candIndex, (candidateKey, _) ->
         val candBssid = candidateKey
@@ -612,9 +642,8 @@ private fun DrawScope.drawTelemetryGraph(
     }
 
     // 4. Draw Roam Event Vertical Markers
-    visibleSamples.forEach { sample ->
-        sample.roamEvent?.let { roam ->
-            val x = timestampToX(sample.timestamp)
+    paths.roamLabels.forEach { (timestamp, measuredTag) ->
+            val x = (timestamp - (referenceTimestampMillis - 60_000L)).toFloat() / 60_000f * canvasWidth
             drawLine(
                 color = palette.accent5GHz,
                 start = Offset(x, 0f),
@@ -623,34 +652,20 @@ private fun DrawScope.drawTelemetryGraph(
                 pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 4f))
             )
 
-            val tag = "ROAM [${roam.fromBand.displayName} → ${roam.toBand.displayName}]"
-            val style = TextStyle(color = palette.accent5GHz, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-            val measuredTag = textMeasurer.measure(tag, style)
             drawText(
                 textLayoutResult = measuredTag,
                 topLeft = Offset(min(x + 4f, canvasWidth - measuredTag.size.width - 4f), 8f)
             )
-        }
     }
 
     // 5. Color each connection segment by its measured band.
     paths.activeSegments.forEach { segment ->
-        val activeColor = if (segment.band == BandType.BAND_5_GHZ || segment.band == BandType.BAND_6_GHZ) {
-            palette.accent5GHz
-        } else palette.accent24GHz
-        drawPath(
-            path = segment.fill,
-            brush = Brush.verticalGradient(
-                colors = listOf(activeColor.copy(alpha = 0.22f), activeColor.copy(alpha = 0.02f)),
-                startY = dbmToY(-40f),
-                endY = canvasHeight
-            )
-        )
+        drawPath(path = segment.fill, brush = segment.fillBrush)
 
         // Bold active line
         drawPath(
             path = segment.line,
-            color = activeColor,
+            color = segment.color,
             style = Stroke(width = 3.2f, cap = StrokeCap.Round, join = StrokeJoin.Round)
         )
 
@@ -668,6 +683,9 @@ private fun DrawScope.drawTelemetryGraph(
                 radius = 2.5f,
                 center = paths.lastPoint
             )
+    }
+
+      }
     }
 
     // 6. Draw Bottom Time Labels (e.g. -60s, -30s, NOW)
