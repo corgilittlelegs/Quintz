@@ -423,7 +423,9 @@ fun MainScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            val isWideScreen = maxWidth >= 760.dp
+            val configuration = LocalConfiguration.current
+            val isTablet = configuration.smallestScreenWidthDp >= 600
+            val isWideScreen = isTablet && maxWidth >= 760.dp && maxHeight >= 480.dp
             LaunchedEffect(isWideScreen, selectedRightPane, selectedPhoneTab) {
                 viewModel.setScannerActive(isWideScreen || selectedPhoneTab != PhoneTab.CONTROLS)
                 viewModel.setTelemetryActive(
@@ -548,6 +550,7 @@ fun MainScreen(
 
                             if (selectedRightPane == RightPaneView.SCANNER) {
                                 Row(
+                                    modifier = Modifier.horizontalScroll(rememberScrollState()),
                                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
@@ -571,7 +574,7 @@ fun MainScreen(
                                         isQueued = isScanQueued,
                                         enabled = !isOperating && !isScanning && !isScanQueued && shizukuState.isPermissionGranted,
                                         onRefresh = { viewModel.refreshAll() },
-                                        showLabel = true
+                                        showLabel = false
                                     )
                                 }
                             }
