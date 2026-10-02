@@ -17,11 +17,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.ScrollState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.*
@@ -43,6 +46,10 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.window.Dialog
 import com.quintz.wifi.BuildConfig
 import com.quintz.wifi.R
@@ -440,6 +447,7 @@ fun MainScreen(
                         CliConnectedHeroPanel(
                             status = wifiStatus,
                             isOperating = isOperating,
+                            isPreparingPrefer = isPreparingPrefer,
                             recoveryThresholdRssi = viewModel.prefs.recoveryThresholdRssi,
                             onGetMacPolicy = { viewModel.getMacPolicy(it) },
                             onToggleMacPolicy = { ssid ->
@@ -621,13 +629,7 @@ fun MainScreen(
                                     GraphPane(
                                         viewModel = viewModel,
                                         scrollState = graphScrollState,
-                                        isConnected = wifiStatus.isConnected,
-                                        onLockBssid = { bssid ->
-                                            val radio = radios.find { it.bssid.equals(bssid, ignoreCase = true) }
-                                            if (radio != null) {
-                                                requestRadioBind(radio, "graph")
-                                            }
-                                        }
+                                        isConnected = wifiStatus.isConnected
                                     )
                                 }
                             }
@@ -639,7 +641,7 @@ fun MainScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(horizontal = 16.dp)
+                        .padding(start = 16.dp, end = 16.dp, bottom = 16.dp)
                 ) {
                     Spacer(modifier = Modifier.height(8.dp))
 
@@ -719,6 +721,7 @@ fun MainScreen(
                                     CliConnectedHeroPanel(
                                         status = wifiStatus,
                                         isOperating = isOperating,
+                                        isPreparingPrefer = isPreparingPrefer,
                                         recoveryThresholdRssi = viewModel.prefs.recoveryThresholdRssi,
                                         onGetMacPolicy = { viewModel.getMacPolicy(it) },
                                         onToggleMacPolicy = { ssid ->
@@ -765,14 +768,14 @@ fun MainScreen(
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Text(
-                                                text = "DETECTED RADIOS",
-                                                style = CliTypography.TelemetryLabel
-                                            )
-                                        }
+                                        Text(
+                                            text = "DETECTED RADIOS",
+                                            style = CliTypography.TelemetryLabel,
+                                            modifier = Modifier.padding(end = 6.dp)
+                                        )
 
                                         Row(
+                                            modifier = Modifier.horizontalScroll(rememberScrollState()),
                                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
@@ -851,13 +854,7 @@ fun MainScreen(
                                 GraphPane(
                                     viewModel = viewModel,
                                     scrollState = graphScrollState,
-                                    isConnected = wifiStatus.isConnected,
-                                    onLockBssid = { bssid ->
-                                        val radio = radios.find { it.bssid.equals(bssid, ignoreCase = true) }
-                                        if (radio != null) {
-                                            requestRadioBind(radio, "graph")
-                                        }
-                                    }
+                                    isConnected = wifiStatus.isConnected
                                 )
                             }
                         }
@@ -868,53 +865,89 @@ fun MainScreen(
     }
 
     pendingPreferRadio?.let { radio ->
-        Dialog(onDismissRequest = { pendingPreferRadio = null }) {
-            CliPanel(
-                borderColor = CliBorderActive,
-                containerColor = CliSurface,
-                shape = RoundedCornerShape(8.dp),
-                contentPadding = PaddingValues(20.dp)
+        Dialog(
+            onDismissRequest = { pendingPreferRadio = null },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.72f))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { pendingPreferRadio = null },
+                contentAlignment = Alignment.Center
             ) {
-                Text("CONFIRM 5 GHz RADIO", style = CliTypography.TelemetryLabel, color = CliAccent5GHz)
-                Spacer(modifier = Modifier.height(12.dp))
-                Text("SSID: ${radio.ssid}", style = CliTypography.CodeMono, color = CliTextPrimary)
-                Text("BSSID: ${radio.bssid}", style = CliTypography.CodeMono, color = CliTextPrimary)
-                Text("Security: ${WifiSecurityPolicy.securityLabel(radio.flags)}", style = CliTypography.CodeMono, color = CliTextPrimary)
-                Spacer(modifier = Modifier.height(10.dp))
-                Text("Updates the saved profile and may interrupt the connection. Roaming remains enabled.",
-                    style = Typography.bodyMedium, color = CliTextSecondary)
-                Spacer(modifier = Modifier.height(16.dp))
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    CliButton(text = "CANCEL", variant = CliButtonVariant.Ghost,
-                        onClick = { pendingPreferRadio = null }, modifier = Modifier.weight(1f))
-                    CliButton(text = "PREFER 5 GHZ", variant = CliButtonVariant.Primary,
-                        onClick = { confirmPrefer5Ghz() }, modifier = Modifier.weight(1.5f))
+                CliPanel(
+                    borderColor = CliBorderActive,
+                    containerColor = CliSurface,
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(20.dp),
+                    modifier = Modifier
+                        .fillMaxWidth(0.92f)
+                        .widthIn(max = 440.dp)
+                        .clickable(enabled = false) {}
+                ) {
+                    Text("CONFIRM 5 GHz RADIO", style = CliTypography.TelemetryLabel, color = CliAccent5GHz)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("SSID: ${radio.ssid}", style = CliTypography.CodeMono, color = CliTextPrimary)
+                    Text("BSSID: ${radio.bssid}", style = CliTypography.CodeMono, color = CliTextPrimary)
+                    Text("Security: ${WifiSecurityPolicy.securityLabel(radio.flags)}", style = CliTypography.CodeMono, color = CliTextPrimary)
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text("Updates the saved profile and may interrupt the connection. Roaming remains enabled.",
+                        style = Typography.bodyMedium, color = CliTextSecondary)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        CliButton(text = "CANCEL", variant = CliButtonVariant.Ghost,
+                            onClick = { pendingPreferRadio = null }, modifier = Modifier.weight(1f))
+                        CliButton(text = "PREFER 5 GHZ", variant = CliButtonVariant.Primary,
+                            onClick = { confirmPrefer5Ghz() }, modifier = Modifier.weight(1.5f))
+                    }
                 }
             }
         }
     }
 
     pendingBindRadio?.let { radio ->
-        Dialog(onDismissRequest = { pendingBindRadio = null }) {
-            CliPanel(
-                borderColor = CliBorderActive,
-                containerColor = CliSurface,
-                shape = RoundedCornerShape(8.dp),
-                contentPadding = PaddingValues(20.dp)
+        Dialog(
+            onDismissRequest = { pendingBindRadio = null },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.72f))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { pendingBindRadio = null },
+                contentAlignment = Alignment.Center
             ) {
-                Text("CONFIRM BSSID BIND", style = CliTypography.TelemetryLabel, color = CliAccent5GHz)
-                Spacer(modifier = Modifier.height(12.dp))
-                Text("SSID: ${radio.ssid.ifEmpty { wifiStatus.ssid }}", style = CliTypography.CodeMono, color = CliTextPrimary)
-                Text("BSSID: ${radio.bssid}", style = CliTypography.CodeMono, color = CliTextPrimary)
-                Text("Security: ${WifiSecurityPolicy.securityLabel(radio.flags)}", style = CliTypography.CodeMono, color = CliTextPrimary)
-                Spacer(modifier = Modifier.height(10.dp))
-                Text("Updates the saved network profile and may interrupt the current connection.", style = Typography.bodyMedium, color = CliTextSecondary)
-                Spacer(modifier = Modifier.height(16.dp))
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    CliButton(text = "CANCEL", variant = CliButtonVariant.Ghost,
-                        onClick = { pendingBindRadio = null }, modifier = Modifier.weight(1f))
-                    CliButton(text = "BIND", variant = CliButtonVariant.Primary,
-                        onClick = { confirmRadioBind() }, modifier = Modifier.weight(1f))
+                CliPanel(
+                    borderColor = CliBorderActive,
+                    containerColor = CliSurface,
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(20.dp),
+                    modifier = Modifier
+                        .fillMaxWidth(0.92f)
+                        .widthIn(max = 440.dp)
+                        .clickable(enabled = false) {}
+                ) {
+                    Text("CONFIRM BSSID BIND", style = CliTypography.TelemetryLabel, color = CliAccent5GHz)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("SSID: ${radio.ssid.ifEmpty { wifiStatus.ssid }}", style = CliTypography.CodeMono, color = CliTextPrimary)
+                    Text("BSSID: ${radio.bssid}", style = CliTypography.CodeMono, color = CliTextPrimary)
+                    Text("Security: ${WifiSecurityPolicy.securityLabel(radio.flags)}", style = CliTypography.CodeMono, color = CliTextPrimary)
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text("Updates the saved network profile and may interrupt the current connection.", style = Typography.bodyMedium, color = CliTextSecondary)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        CliButton(text = "CANCEL", variant = CliButtonVariant.Ghost,
+                            onClick = { pendingBindRadio = null }, modifier = Modifier.weight(1f))
+                        CliButton(text = "BIND", variant = CliButtonVariant.Primary,
+                            onClick = { confirmRadioBind() }, modifier = Modifier.weight(1f))
+                    }
                 }
             }
         }
@@ -922,130 +955,172 @@ fun MainScreen(
 
     // Industrial Passphrase Prompt Dialog
     if (showPasswordDialog) {
-        Dialog(onDismissRequest = {
-            showPasswordDialog = false
-            isPasswordVisible = false
-            preferRadioForPassword = null
-        }) {
-            CliPanel(
-                borderColor = CliBorderActive,
-                containerColor = CliSurface,
-                shape = RoundedCornerShape(8.dp),
-                contentPadding = PaddingValues(20.dp)
+        val isPreferFlow = preferRadioForPassword != null
+        val promptTitle = if (isPreferFlow) "AUTHENTICATE 5 GHz PREFERENCE" else "AUTHENTICATE BSSID BIND"
+        val isTargetOpen = targetRadioForPassword?.let {
+            val advertised = WifiSecurityPolicy.fromFlags(it.flags)
+            advertised.isOpen || advertised.isOwe
+        } ?: (wifiStatus.securityType == "0" || wifiStatus.securityType == "6" || wifiStatus.securityType == "open")
+
+        val promptSsid = (preferRadioForPassword ?: targetRadioForPassword)?.ssid?.ifEmpty { wifiStatus.ssid } ?: wifiStatus.ssid
+
+        val promptDescription = if (isTargetOpen) {
+            "This network is Open / Unsecured. No passphrase required."
+        } else if (isPreferFlow) {
+            "Android requires credentials to prioritize 5 GHz bands while allowing roaming. Stored securely on-device."
+        } else {
+            "Android requires credentials to enforce specific BSSID binding. Stored securely on-device."
+        }
+        val promptButtonText = if (isPreferFlow) "PREFER 5 GHZ" else "BIND & LOCK"
+
+        fun submitPassphrase() {
+            if (isTargetOpen || passwordInput.isNotBlank()) {
+                val source = if (preferRadioForPassword != null) "main_screen_password_dialog_prefer_5ghz"
+                    else "main_screen_password_dialog_bind_lock"
+                val correlationId = DiagnosticLogger.newCorrelationId()
+                showPasswordDialog = false
+                val target = targetRadioForPassword
+                val preferTarget = preferRadioForPassword
+                preferRadioForPassword = null
+                val pass = if (isTargetOpen) "" else passwordInput
+                val targetSsid = (preferTarget ?: target)?.ssid?.ifEmpty { wifiStatus.ssid } ?: wifiStatus.ssid
+                DiagnosticLogger.log(
+                    "USER_ACTION",
+                    "id=$correlationId source=$source callback=${if (preferTarget != null) "prefer_5ghz" else "bind_and_lock"} targetSsid='$targetSsid' targetBssid=${(preferTarget ?: target)?.bssid ?: "auto_5ghz"} connected=${wifiStatus.isConnected} currentBssid=${wifiStatus.bssid} band=${wifiStatus.band.displayName} rssi=${wifiStatus.rssi}"
+                )
+                executeWithMacPolicyCheck(targetSsid) {
+                    if (preferTarget != null) {
+                        viewModel.forceLock5Ghz(pass, approvedBssid = preferTarget.bssid,
+                            requestSource = source, correlationId = correlationId)
+                    } else if (target != null) {
+                        viewModel.lockToSpecificRadio(target, pass, requestSource = source, correlationId = correlationId)
+                    } else {
+                        viewModel.forceLock5Ghz(pass, requestSource = source, correlationId = correlationId)
+                    }
+                }
+            }
+        }
+
+        Dialog(
+            onDismissRequest = {
+                showPasswordDialog = false
+                isPasswordVisible = false
+                preferRadioForPassword = null
+            },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.72f))
+                    .imePadding()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) {
+                        showPasswordDialog = false
+                        isPasswordVisible = false
+                        preferRadioForPassword = null
+                    },
+                contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = "AUTHENTICATE BSSID",
-                    style = CliTypography.TelemetryLabel,
-                    color = CliAccent5GHz
-                )
-                val isTargetOpen = targetRadioForPassword?.let {
-                    val advertised = WifiSecurityPolicy.fromFlags(it.flags)
-                    advertised.isOpen || advertised.isOwe
-                } ?: (wifiStatus.securityType == "0" || wifiStatus.securityType == "6" || wifiStatus.securityType == "open")
-
-                val promptSsid = (preferRadioForPassword ?: targetRadioForPassword)?.ssid?.ifEmpty { wifiStatus.ssid } ?: wifiStatus.ssid
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = if (promptSsid.isNotEmpty()) "Network: \"$promptSsid\"" else "Network Credentials",
-                    style = Typography.titleMedium,
-                    color = CliTextPrimary
-                )
-                preferRadioForPassword?.let { radio ->
-                    Text("Target BSSID: ${radio.bssid}", style = CliTypography.CodeMono, color = CliTextSecondary)
-                }
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = if (isTargetOpen)
-                        "This network is Open / Unsecured. No passphrase required."
-                    else
-                        "Android requires credentials to enforce specific BSSID binding. Stored securely on-device.",
-                    style = Typography.bodyMedium,
-                    color = CliTextSecondary
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-
-                if (!isTargetOpen) {
-                    OutlinedTextField(
-                        value = passwordInput,
-                        onValueChange = { passwordInput = it },
-                        placeholder = {
-                            Text("Enter passphrase :_", style = CliTypography.CodeMono, color = CliTextTertiary)
-                        },
-                        visualTransformation = if (isPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                        trailingIcon = {
-                            IconButton(
-                                onClick = { isPasswordVisible = !isPasswordVisible },
-                                modifier = Modifier.size(36.dp)
-                            ) {
-                                Icon(
-                                    imageVector = if (isPasswordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                    contentDescription = if (isPasswordVisible) "Hide passphrase" else "Show passphrase",
-                                    tint = if (isPasswordVisible) CliAccent5GHz else CliTextTertiary,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                        },
-                        singleLine = true,
-                        textStyle = CliTypography.CodeMono.copy(color = CliTextPrimary),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = CliTextPrimary,
-                            unfocusedTextColor = CliTextPrimary,
-                            focusedContainerColor = CliSurfaceElevated,
-                            unfocusedContainerColor = CliSurfaceElevated,
-                            focusedBorderColor = CliAccent5GHz,
-                            unfocusedBorderColor = CliBorder
-                        ),
-                        shape = RoundedCornerShape(6.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(modifier = Modifier.height(20.dp))
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                CliPanel(
+                    borderColor = CliBorderActive,
+                    containerColor = CliSurface,
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(20.dp),
+                    modifier = Modifier
+                        .fillMaxWidth(0.92f)
+                        .widthIn(max = 440.dp)
+                        .verticalScroll(rememberScrollState())
+                        .clickable(enabled = false) {}
                 ) {
-                    CliButton(
-                        text = "CANCEL",
-                        variant = CliButtonVariant.Ghost,
-                        onClick = {
-                            showPasswordDialog = false
-                            preferRadioForPassword = null
-                        },
-                        modifier = Modifier.weight(1f)
+                    Text(
+                        text = promptTitle,
+                        style = CliTypography.TelemetryLabel,
+                        color = CliAccent5GHz
                     )
-                    CliButton(
-                        text = if (preferRadioForPassword != null) "PREFER 5 GHZ" else "BIND & LOCK",
-                        variant = CliButtonVariant.Primary,
-                        onClick = {
-                            if (isTargetOpen || passwordInput.isNotBlank()) {
-                                val source = if (preferRadioForPassword != null) "main_screen_password_dialog_prefer_5ghz"
-                                    else "main_screen_password_dialog_bind_lock"
-                                val correlationId = DiagnosticLogger.newCorrelationId()
-                                showPasswordDialog = false
-                                val target = targetRadioForPassword
-                                val preferTarget = preferRadioForPassword
-                                preferRadioForPassword = null
-                                val pass = if (isTargetOpen) "" else passwordInput
-                                val targetSsid = (preferTarget ?: target)?.ssid?.ifEmpty { wifiStatus.ssid } ?: wifiStatus.ssid
-                                DiagnosticLogger.log(
-                                    "USER_ACTION",
-                                    "id=$correlationId source=$source callback=${if (preferTarget != null) "prefer_5ghz" else "bind_and_lock"} targetSsid='$targetSsid' targetBssid=${(preferTarget ?: target)?.bssid ?: "auto_5ghz"} connected=${wifiStatus.isConnected} currentBssid=${wifiStatus.bssid} band=${wifiStatus.band.displayName} rssi=${wifiStatus.rssi}"
-                                )
-                                executeWithMacPolicyCheck(targetSsid) {
-                                    if (preferTarget != null) {
-                                        viewModel.forceLock5Ghz(pass, approvedBssid = preferTarget.bssid,
-                                            requestSource = source, correlationId = correlationId)
-                                    } else if (target != null) {
-                                        viewModel.lockToSpecificRadio(target, pass, requestSource = source, correlationId = correlationId)
-                                    } else {
-                                        viewModel.forceLock5Ghz(pass, requestSource = source, correlationId = correlationId)
-                                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = if (promptSsid.isNotEmpty()) "Network: \"$promptSsid\"" else "Network Credentials",
+                        style = Typography.titleMedium,
+                        color = CliTextPrimary
+                    )
+                    preferRadioForPassword?.let { radio ->
+                        Text("Target BSSID: ${radio.bssid}", style = CliTypography.CodeMono, color = CliTextSecondary)
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = promptDescription,
+                        style = Typography.bodyMedium,
+                        color = CliTextSecondary
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    if (!isTargetOpen) {
+                        OutlinedTextField(
+                            value = passwordInput,
+                            onValueChange = { passwordInput = it },
+                            placeholder = {
+                                Text("Enter passphrase :_", style = CliTypography.CodeMono, color = CliTextTertiary)
+                            },
+                            visualTransformation = if (isPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                            trailingIcon = {
+                                IconButton(
+                                    onClick = { isPasswordVisible = !isPasswordVisible },
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (isPasswordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                        contentDescription = if (isPasswordVisible) "Hide passphrase" else "Show passphrase",
+                                        tint = if (isPasswordVisible) CliAccent5GHz else CliTextTertiary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
                                 }
-                            }
-                        },
-                        modifier = Modifier.weight(1.5f)
-                    )
+                            },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Password,
+                                imeAction = ImeAction.Done
+                            ),
+                            keyboardActions = KeyboardActions(
+                                onDone = { submitPassphrase() }
+                            ),
+                            textStyle = CliTypography.CodeMono.copy(color = CliTextPrimary),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = CliTextPrimary,
+                                unfocusedTextColor = CliTextPrimary,
+                                focusedContainerColor = CliSurfaceElevated,
+                                unfocusedContainerColor = CliSurfaceElevated,
+                                focusedBorderColor = CliAccent5GHz,
+                                unfocusedBorderColor = CliBorder
+                            ),
+                            shape = RoundedCornerShape(6.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(20.dp))
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        CliButton(
+                            text = "CANCEL",
+                            variant = CliButtonVariant.Ghost,
+                            onClick = {
+                                showPasswordDialog = false
+                                preferRadioForPassword = null
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        CliButton(
+                            text = promptButtonText,
+                            variant = CliButtonVariant.Primary,
+                            onClick = { submitPassphrase() },
+                            modifier = Modifier.weight(1.5f)
+                        )
+                    }
                 }
             }
         }
@@ -1068,40 +1143,57 @@ fun MainScreen(
     }
 
     if (showBatteryOptimizationPrompt) {
-        Dialog(onDismissRequest = { viewModel.dismissBatteryOptimizationExplanation() }) {
-            CliPanel(
-                borderColor = CliAccent24GHz,
-                containerColor = CliSurface,
-                shape = RoundedCornerShape(8.dp),
-                contentPadding = PaddingValues(20.dp),
-                modifier = Modifier.fillMaxWidth()
+        Dialog(
+            onDismissRequest = { viewModel.dismissBatteryOptimizationExplanation() },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.72f))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { viewModel.dismissBatteryOptimizationExplanation() },
+                contentAlignment = Alignment.Center
             ) {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = "BATTERY SETTING FOR WATCHDOG",
-                        style = CliTypography.TelemetryLabel,
-                        color = CliAccent24GHz
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Text(
-                        text = "Android may delay 5 GHz recovery while this device sleeps. Allow unrestricted battery use for more reliable monitoring. This may increase battery use.",
-                        style = Typography.bodyMedium,
-                        color = CliTextPrimary
-                    )
-                    Spacer(modifier = Modifier.height(18.dp))
-                    CliButton(
-                        text = "REQUEST UNRESTRICTED",
-                        variant = CliButtonVariant.Primary,
-                        onClick = { openBatteryOptimizationRequest() },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    CliButton(
-                        text = "LATER",
-                        variant = CliButtonVariant.Ghost,
-                        onClick = { viewModel.dismissBatteryOptimizationExplanation() },
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                CliPanel(
+                    borderColor = CliAccent24GHz,
+                    containerColor = CliSurface,
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(20.dp),
+                    modifier = Modifier
+                        .fillMaxWidth(0.92f)
+                        .widthIn(max = 440.dp)
+                        .clickable(enabled = false) {}
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = "BATTERY SETTING FOR WATCHDOG",
+                            style = CliTypography.TelemetryLabel,
+                            color = CliAccent24GHz
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "Android may delay 5 GHz recovery while this device sleeps. Allow unrestricted battery use for more reliable monitoring. This may increase battery use.",
+                            style = Typography.bodyMedium,
+                            color = CliTextPrimary
+                        )
+                        Spacer(modifier = Modifier.height(18.dp))
+                        CliButton(
+                            text = "REQUEST UNRESTRICTED",
+                            variant = CliButtonVariant.Primary,
+                            onClick = { openBatteryOptimizationRequest() },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        CliButton(
+                            text = "LATER",
+                            variant = CliButtonVariant.Ghost,
+                            onClick = { viewModel.dismissBatteryOptimizationExplanation() },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
                 }
             }
         }
@@ -1242,8 +1334,7 @@ fun MainScreen(
 private fun GraphPane(
     viewModel: MainViewModel,
     scrollState: ScrollState,
-    isConnected: Boolean,
-    onLockBssid: (String) -> Unit
+    isConnected: Boolean
 ) {
     // Keep frequent telemetry updates inside this pane's own recomposition scope.
     val telemetryState by viewModel.telemetryState.collectAsState()
@@ -1254,7 +1345,6 @@ private fun GraphPane(
         onTogglePause = { viewModel.togglePauseTelemetry() },
         onClearHistory = { viewModel.clearTelemetryHistory() },
         onSelectCandidate = { viewModel.selectCandidateBssid(it) },
-        onLockBssid = onLockBssid,
         isConnected = if (telemetryState.isPaused) telemetryState.isConnected else isConnected
     )
 }

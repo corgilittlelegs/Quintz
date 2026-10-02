@@ -98,6 +98,7 @@ fun CliShizukuPanel(
                 !shizukuState.isInstalled -> {
                     CliButton(
                         text = "GET SHIZUKU ↗",
+                        size = CliButtonSize.Compact,
                         variant = CliButtonVariant.Primary,
                         onClick = onOpenPlayStore
                     )
@@ -105,6 +106,7 @@ fun CliShizukuPanel(
                 !shizukuState.isRunning -> {
                     CliButton(
                         text = "OPEN SHIZUKU ↗",
+                        size = CliButtonSize.Compact,
                         variant = CliButtonVariant.Primary,
                         onClick = onOpenShizuku
                     )
@@ -113,11 +115,13 @@ fun CliShizukuPanel(
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         CliButton(
                             text = "OPEN ↗",
+                            size = CliButtonSize.Compact,
                             variant = CliButtonVariant.Outlined,
                             onClick = onOpenShizuku
                         )
                         CliButton(
                             text = "GRANT",
+                            size = CliButtonSize.Compact,
                             variant = CliButtonVariant.Primary,
                             onClick = onRequestPermission
                         )
@@ -126,6 +130,7 @@ fun CliShizukuPanel(
                 else -> {
                     CliButton(
                         text = "OPEN APP ↗",
+                        size = CliButtonSize.Compact,
                         variant = CliButtonVariant.Outlined,
                         onClick = onOpenShizuku
                     )

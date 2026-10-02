@@ -50,8 +50,6 @@ import com.quintz.wifi.telemetry.TelemetryGraphState
 import com.quintz.wifi.telemetry.TelemetrySample
 import com.quintz.wifi.telemetry.isFreshCandidate
 import com.quintz.wifi.ui.components.CliBadge
-import com.quintz.wifi.ui.components.CliButton
-import com.quintz.wifi.ui.components.CliButtonVariant
 import com.quintz.wifi.ui.components.CliPanel
 import com.quintz.wifi.ui.theme.*
 import kotlinx.coroutines.flow.StateFlow
@@ -159,7 +157,6 @@ fun WifiGraphView(
     onTogglePause: () -> Unit,
     onClearHistory: () -> Unit,
     onSelectCandidate: (String?) -> Unit,
-    onLockBssid: (String) -> Unit,
     modifier: Modifier = Modifier,
     isConnected: Boolean = true
 ) {
@@ -420,7 +417,6 @@ fun WifiGraphView(
                         candidate = candidate,
                         activeRssi = state.activeRssi,
                         nowTimestampMillis = state.nowTimestampMillis,
-                        isPaused = state.isPaused,
                         isSelected = state.selectedCandidateBssid == candidate.bssid,
                         onSelect = {
                             if (state.selectedCandidateBssid == candidate.bssid) {
@@ -428,8 +424,7 @@ fun WifiGraphView(
                             } else {
                                 onSelectCandidate(candidate.bssid)
                             }
-                        },
-                        onLock = { onLockBssid(candidate.bssid) }
+                        }
                     )
                 }
             }
@@ -448,6 +443,8 @@ fun WifiGraphView(
                 )
             }
         }
+
+        Spacer(modifier = Modifier.height(16.dp))
     }
 }
 
@@ -691,10 +688,8 @@ private fun CandidateApCard(
     candidate: CandidateMeta,
     activeRssi: Int,
     nowTimestampMillis: Long,
-    isPaused: Boolean,
     isSelected: Boolean,
-    onSelect: () -> Unit,
-    onLock: () -> Unit
+    onSelect: () -> Unit
 ) {
     val delta = candidate.latestRssi - activeRssi
     val isFresh = candidate.isInLatestScan && isFreshCandidate(candidate.observedAtMillis, nowTimestampMillis)
@@ -719,6 +714,7 @@ private fun CandidateApCard(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Row(
+            modifier = Modifier.weight(1f).padding(end = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -730,7 +726,7 @@ private fun CandidateApCard(
                     .background(candColor)
             )
 
-            Column {
+            Column(modifier = Modifier.weight(1f)) {
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -751,24 +747,11 @@ private fun CandidateApCard(
                     text = "Signal: ${candidate.latestRssi} dBm · measured ${((nowTimestampMillis - candidate.observedAtMillis).coerceAtLeast(0L) / 1000L)}s ago" +
                         if (isFresh) " · advantage $deltaText" else " · STALE SCAN",
                     style = CliTypography.CodeMono,
-                    color = if (isFresh) deltaColor else CliTextTertiary
+                    color = if (isFresh) deltaColor else CliTextTertiary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }
-
-        // Lock button
-        CliButton(
-            onClick = onLock,
-            text = if (isPaused) "PAUSED" else if (isFresh) "LOCK" else "STALE",
-            enabled = !isPaused && isFresh,
-            variant = if (delta >= 6) CliButtonVariant.Primary else CliButtonVariant.Outlined,
-            leadingIcon = {
-                Icon(
-                    imageVector = Icons.Default.Lock,
-                    contentDescription = "Lock to BSSID",
-                    modifier = Modifier.size(12.dp)
-                )
-            }
-        )
     }
 }

@@ -55,12 +55,14 @@ fun CliQuickTilePanel(
             if (isTileAdded) {
                 CliButton(
                     text = "REMOVE",
+                    size = CliButtonSize.Compact,
                     variant = CliButtonVariant.Ghost,
                     onClick = onRemoveTile
                 )
             } else {
                 CliButton(
                     text = "ADD TILE",
+                    size = CliButtonSize.Compact,
                     variant = CliButtonVariant.Outlined,
                     onClick = onAddTile
                 )

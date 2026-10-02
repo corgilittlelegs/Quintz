@@ -96,6 +96,11 @@ enum class CliButtonVariant {
     Destructive
 }
 
+enum class CliButtonSize {
+    Default,
+    Compact
+}
+
 /**
  * Stark, high-contrast industrial CLI button with tactile haptic feedback.
  */
@@ -105,6 +110,7 @@ fun CliButton(
     modifier: Modifier = Modifier,
     text: String? = null,
     variant: CliButtonVariant = CliButtonVariant.Primary,
+    size: CliButtonSize = CliButtonSize.Default,
     enabled: Boolean = true,
     loading: Boolean = false,
     leadingIcon: (@Composable () -> Unit)? = null,
@@ -136,9 +142,17 @@ fun CliButton(
         )
     }
 
+    val minHeight = if (size == CliButtonSize.Compact) 32.dp else 44.dp
+    val minWidth = if (size == CliButtonSize.Compact) 56.dp else 72.dp
+    val horizontalPadding = if (size == CliButtonSize.Compact) 10.dp else 16.dp
+    val verticalPadding = if (size == CliButtonSize.Compact) 6.dp else 10.dp
+    val fontSize = if (size == CliButtonSize.Compact) 11.5.sp else 13.sp
+    val letterSpacing = if (size == CliButtonSize.Compact) 0.2.sp else 0.4.sp
+    val iconSpacing = if (size == CliButtonSize.Compact) 5.dp else 8.dp
+
     Surface(
         modifier = modifier
-            .defaultMinSize(minHeight = 44.dp)
+            .defaultMinSize(minWidth = minWidth, minHeight = minHeight)
             .then(
                 if (border != null) Modifier.border(border.width, border.brush, shape) else Modifier
             )
@@ -157,20 +171,20 @@ fun CliButton(
         shadowElevation = 0.dp
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+            modifier = Modifier.padding(horizontal = horizontalPadding, vertical = verticalPadding),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center
         ) {
             if (loading) {
                 CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp),
+                    modifier = Modifier.size(if (size == CliButtonSize.Compact) 13.dp else 16.dp),
                     color = contentColor,
                     strokeWidth = 2.dp
                 )
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(iconSpacing))
             } else if (leadingIcon != null) {
                 leadingIcon()
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(iconSpacing))
             }
 
             if (content != null) {
@@ -180,9 +194,11 @@ fun CliButton(
                     text = text,
                     fontFamily = InterFamily,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 13.sp,
-                    letterSpacing = 0.4.sp,
-                    color = contentColor
+                    fontSize = fontSize,
+                    letterSpacing = letterSpacing,
+                    color = contentColor,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
         }

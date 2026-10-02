@@ -14,6 +14,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.quintz.wifi.model.AccessPointRadio
@@ -26,6 +27,7 @@ import com.quintz.wifi.ui.theme.*
 fun CliConnectedHeroPanel(
     status: WifiStatus,
     isOperating: Boolean,
+    isPreparingPrefer: Boolean = false,
     recoveryThresholdRssi: Int,
     onToggleLock: () -> Unit,
     onOpenGraph: (() -> Unit)? = null,
@@ -116,7 +118,7 @@ fun CliConnectedHeroPanel(
             )
         }
 
-        if (isOperating) {
+        if (isOperating || isPreparingPrefer) {
             Spacer(modifier = Modifier.height(8.dp))
             LinearProgressIndicator(
                 modifier = Modifier
@@ -346,7 +348,8 @@ fun CliConnectedHeroPanel(
 
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.weight(1f, fill = false).padding(start = 8.dp)
                     ) {
                         Box(
                             modifier = Modifier
@@ -364,7 +367,9 @@ fun CliConnectedHeroPanel(
                             },
                             style = CliTypography.CodeMono,
                             color = if (isWatchdogActive && status.isPreferred5GHzFallback) CliAccent24GHz else if (isWatchdogActive) CliAccentGreen else CliTextTertiary,
-                            fontSize = 11.5.sp
+                            fontSize = 11.5.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -394,10 +399,15 @@ fun CliConnectedHeroPanel(
             // Primary Command Button
             CliButton(
                 onClick = onToggleLock,
-                enabled = !isOperating,
-                loading = isOperating,
+                enabled = !isOperating && !isPreparingPrefer,
+                loading = isOperating || isPreparingPrefer,
                 variant = if (isLocked) CliButtonVariant.Outlined else CliButtonVariant.Primary,
-                text = if (isOperating) "SWITCHING BAND..." else if (isLocked) "UNLOCK TO AUTO-ROAM" else "PREFER 5 GHz (ROAM ALLOWED)",
+                text = when {
+                    isOperating -> "SWITCHING BAND..."
+                    isPreparingPrefer -> "FINDING 5 GHZ RADIO..."
+                    isLocked -> "UNLOCK TO AUTO-ROAM"
+                    else -> "PREFER 5 GHz (ROAM ALLOWED)"
+                },
                 modifier = Modifier.fillMaxWidth()
             )
         }
