@@ -89,8 +89,42 @@ private data class GraphPaths(
     val activeSegments: List<ActiveSegment>,
     val lastPoint: Offset?,
     val lastStatusTimestamp: Long,
-    val roamLabels: List<Pair<Long, TextLayoutResult>>
+    val roamLabels: List<Pair<Long, TextLayoutResult>>,
+    val tail: CurveTail?
 )
+
+// Only the newest measured interval is revealed over 350 ms. Older history stays fixed.
+private data class CurveTail(val start: Offset, val end: Offset, val line: Path, val fill: Path) {
+    fun pointAt(progress: Float): Offset {
+        val t = progress.coerceIn(0f, 1f)
+        return Offset(
+            start.x + (end.x - start.x) * (1.5f * t - 1.5f * t * t + t * t * t),
+            start.y + (end.y - start.y) * (t * t * (3f - 2f * t))
+        )
+    }
+}
+
+private fun curveTail(start: Offset, end: Offset, height: Float): CurveTail {
+    val middleX = (start.x + end.x) / 2f
+    val line = Path().apply {
+        moveTo(start.x, start.y)
+        cubicTo(middleX, start.y, middleX, end.y, end.x, end.y)
+    }
+    val fill = Path().apply {
+        moveTo(start.x, height)
+        lineTo(start.x, start.y)
+        cubicTo(middleX, start.y, middleX, end.y, end.x, end.y)
+        lineTo(end.x, height)
+        close()
+    }
+    return CurveTail(start, end, line, fill)
+}
+
+private fun lineTransitionProgress(now: Long, receivedAt: Long, paused: Boolean): Float {
+    if (paused) return 1f
+    val t = ((now - receivedAt).toFloat() / 350f).coerceIn(0f, 1f)
+    return t * t * (3f - 2f * t)
+}
 
 private data class ActiveSegment(val band: BandType, val line: Path, val fill: Path, val color: Color, val fillBrush: Brush)
 
@@ -109,6 +143,7 @@ private fun buildGraphPaths(series: GraphSeries, now: Long, width: Float, height
     var lastPoint: Offset? = null
     var lastTimestamp = 0L
     var previousSample: TelemetrySample? = null
+    var tail: CurveTail? = null
     fun finishSegment() {
         lastPoint?.let {
             fill.lineTo(it.x, height)
@@ -119,7 +154,7 @@ private fun buildGraphPaths(series: GraphSeries, now: Long, width: Float, height
                 startY = height * (1f - 55f / 65f), endY = height)))
         }
     }
-    series.visibleSamples.forEach { sample ->
+    series.visibleSamples.forEachIndexed { index, sample ->
         if (sample.activeRssi in -110..-20) {
             val point = Offset(x(sample.timestamp), y(sample.activeRssi))
             if (lastPoint == null || startsNewTelemetrySegment(previousSample, sample)) {
@@ -130,6 +165,9 @@ private fun buildGraphPaths(series: GraphSeries, now: Long, width: Float, height
                 active.moveTo(point.x, point.y)
                 fill.moveTo(point.x, height)
                 fill.lineTo(point.x, point.y)
+            } else if (index == series.visibleSamples.lastIndex) {
+                finishSegment()
+                tail = curveTail(lastPoint!!, point, height)
             } else {
                 val previous = lastPoint!!
                 val middleX = (previous.x + point.x) / 2f
@@ -141,13 +179,13 @@ private fun buildGraphPaths(series: GraphSeries, now: Long, width: Float, height
             previousSample = sample
         }
     }
-    finishSegment()
+    if (tail == null) finishSegment()
     val roamStyle = TextStyle(color = palette.accent5GHz, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
     val roamLabels = series.visibleSamples.mapNotNull { sample ->
         sample.roamEvent?.let { roam -> sample.timestamp to textMeasurer.measure(
             "ROAM [${roam.fromBand.displayName} → ${roam.toBand.displayName}]", roamStyle) }
     }
-    return GraphPaths(candidatePoints, segments, lastPoint, lastTimestamp, roamLabels)
+    return GraphPaths(candidatePoints, segments, lastPoint, lastTimestamp, roamLabels, tail)
 }
 
 private fun prepareGraphSeries(samples: List<TelemetrySample>, now: Long, liveBssids: Set<String>): GraphSeries {
@@ -197,6 +235,10 @@ fun WifiGraphView(
     }
     val graphSeries = remember(state.samples, state.nowTimestampMillis, state.candidates) {
         prepareGraphSeries(state.samples, state.nowTimestampMillis, state.candidates.map { it.bssid.lowercase() }.toSet())
+    }
+
+    val latestReadingReceivedAt = remember(state.samples.lastOrNull()?.timestamp) {
+        System.currentTimeMillis()
     }
 
     CliPanel(
@@ -411,6 +453,7 @@ fun WifiGraphView(
                                 paths = paths,
                                 referenceTimestampMillis = state.nowTimestampMillis,
                                 nowTimestampMillis = if (state.isPaused) state.nowTimestampMillis else frameNow.longValue,
+                                lineProgress = lineTransitionProgress(frameNow.longValue, latestReadingReceivedAt, state.isPaused),
                                 selectedCandidateBssid = state.selectedCandidateBssid?.lowercase(),
                                 palette = palette,
                                 gridLabels = gridLabels
@@ -421,7 +464,7 @@ fun WifiGraphView(
         }
 
         Spacer(modifier = Modifier.height(12.dp))
-        LinkSpeedHistory(graphSeries.visibleSamples, state.nowTimestampMillis, frameNow, state.isPaused, palette)
+        LinkSpeedHistory(graphSeries.visibleSamples, state.nowTimestampMillis, frameNow, latestReadingReceivedAt, state.isPaused, palette)
 
         Spacer(modifier = Modifier.height(16.dp))
 
@@ -485,7 +528,7 @@ private fun ObservationAgeText(state: TelemetryGraphState, ageClock: StateFlow<L
 }
 
 @Composable
-private fun LinkSpeedHistory(samples: List<TelemetrySample>, now: Long, frameNow: State<Long>, paused: Boolean, palette: CliPalette) {
+private fun LinkSpeedHistory(samples: List<TelemetrySample>, now: Long, frameNow: State<Long>, latestReadingReceivedAt: Long, paused: Boolean, palette: CliPalette) {
     val readings = remember(samples, now) {
         samples.filter { it.timestamp in (now - 60_000L)..now && it.activeLinkSpeedMbps > 0 }
     }
@@ -503,13 +546,16 @@ private fun LinkSpeedHistory(samples: List<TelemetrySample>, now: Long, frameNow
                     val path = Path()
                     var previous: TelemetrySample? = null
                     var lastPoint: Offset? = null
-                    readings.forEach { reading ->
+                    var tail: CurveTail? = null
+                    readings.forEachIndexed { index, reading ->
                         val point = Offset(
                             (reading.timestamp - (now - 60_000L)).toFloat() / 60_000f * size.width,
                             baseline * (1f - reading.activeLinkSpeedMbps.toFloat().coerceIn(0f, scaleMbps.toFloat()) / scaleMbps)
                         )
                         if (startsNewTelemetrySegment(previous, reading)) {
                             path.moveTo(point.x, point.y)
+                        } else if (index == readings.lastIndex) {
+                            tail = curveTail(lastPoint!!, point, baseline)
                         } else {
                             val middleX = (lastPoint!!.x + point.x) / 2f
                             path.cubicTo(middleX, lastPoint!!.y, middleX, point.y, point.x, point.y)
@@ -519,13 +565,21 @@ private fun LinkSpeedHistory(samples: List<TelemetrySample>, now: Long, frameNow
                     }
                     onDrawBehind {
                         val liveNow = if (paused) now else frameNow.value
+                        val progress = if (readings.lastOrNull()?.timestamp == samples.lastOrNull()?.timestamp)
+                            lineTransitionProgress(liveNow, latestReadingReceivedAt, paused) else 1f
+                        val animatedPoint = tail?.pointAt(progress) ?: lastPoint
                         drawLine(palette.borderSubtle, Offset(0f, baseline), Offset(size.width, baseline), 1f)
                         drawLine(palette.borderSubtle, Offset(0f, baseline / 2f), Offset(size.width, baseline / 2f), 1f)
                         clipRect {
                             translate(left = -(liveNow - now).toFloat() / 60_000f * size.width) {
                                 drawPath(path, color = palette.accent5GHz, style = Stroke(width = 2.5f, cap = StrokeCap.Round))
-                                if (lastPoint != null && liveNow - (previous?.timestamp ?: 0L) in 0L..7_500L) {
-                                    drawCircle(palette.accent5GHz, radius = 4f, center = lastPoint!!)
+                                tail?.let { newest ->
+                                    clipRect(right = animatedPoint!!.x) {
+                                        drawPath(newest.line, color = palette.accent5GHz, style = Stroke(width = 2.5f, cap = StrokeCap.Round))
+                                    }
+                                }
+                                if (animatedPoint != null && liveNow - (previous?.timestamp ?: 0L) in 0L..7_500L) {
+                                    drawCircle(palette.accent5GHz, radius = 4f, center = animatedPoint)
                                 }
                             }
                         }
@@ -537,14 +591,11 @@ private fun LinkSpeedHistory(samples: List<TelemetrySample>, now: Long, frameNow
 }
 
 private fun observationAgeSummary(state: TelemetryGraphState, now: Long): String {
-    fun age(timestamp: Long): String = if (timestamp <= 0L) "--" else "${((now - timestamp).coerceAtLeast(0L) / 1000L)}s"
-    val status = if (state.lastStatusObservedAtMillis > 0L) "STATUS ${age(state.lastStatusObservedAtMillis)}" else "STATUS waiting"
-    val scan = when (state.lastScanSucceeded) {
-        true -> "SCAN ${if (state.lastScanWasCoalesced) "reused" else "command ok"} ${age(state.lastScanCompletedAtMillis)} · ${state.lastScanDurationMillis ?: 0L}ms"
-        false -> "SCAN failed ${age(state.lastScanAttemptedAtMillis)}"
-        null -> "SCAN waiting"
-    }
-    return "$status · $scan"
+    if (!state.isConnected) return "Waiting for a Wi-Fi connection"
+    if (state.lastStatusObservedAtMillis <= 0L) return "Waiting for a signal reading"
+    val ageSeconds = (now - state.lastStatusObservedAtMillis).coerceAtLeast(0L) / 1000L
+    val freshness = if (ageSeconds < 2L) "Signal updated just now" else "Signal updated ${ageSeconds}s ago"
+    return if (state.isPaused) "Paused · $freshness" else freshness
 }
 
 /**
@@ -555,6 +606,7 @@ private fun DrawScope.drawTelemetryGraph(
     paths: GraphPaths,
     referenceTimestampMillis: Long,
     nowTimestampMillis: Long,
+    lineProgress: Float,
     selectedCandidateBssid: String?,
     palette: CliPalette,
     gridLabels: Map<String, TextLayoutResult>
@@ -670,18 +722,27 @@ private fun DrawScope.drawTelemetryGraph(
         )
 
     }
-    if (paths.lastPoint != null && nowTimestampMillis - paths.lastStatusTimestamp in 0L..7_500L) {
+    val animatedPoint = paths.tail?.pointAt(lineProgress) ?: paths.lastPoint
+    paths.tail?.let { newest ->
+        val segment = paths.activeSegments.last()
+        clipRect(right = animatedPoint!!.x) {
+            drawPath(newest.fill, brush = segment.fillBrush)
+            drawPath(newest.line, color = segment.color,
+                style = Stroke(width = 3.2f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+        }
+    }
+    if (animatedPoint != null && nowTimestampMillis - paths.lastStatusTimestamp in 0L..7_500L) {
         val lastBand = series.visibleSamples.lastOrNull()?.activeBand
         val activeColor = if (lastBand == BandType.BAND_5_GHZ || lastBand == BandType.BAND_6_GHZ) palette.accent5GHz else palette.accent24GHz
             drawCircle(
                 color = activeColor,
                 radius = 5.5f,
-                center = paths.lastPoint
+                center = animatedPoint
             )
             drawCircle(
                 color = Color.White,
                 radius = 2.5f,
-                center = paths.lastPoint
+                center = animatedPoint
             )
     }
 
@@ -762,8 +823,7 @@ private fun CandidateApCard(
                 }
 
                 Text(
-                    text = "Signal: ${candidate.latestRssi} dBm · measured ${((nowTimestampMillis - candidate.observedAtMillis).coerceAtLeast(0L) / 1000L)}s ago" +
-                        if (isFresh) " · advantage $deltaText" else " · STALE SCAN",
+                    text = "Signal: ${candidate.latestRssi} dBm" + if (isFresh) " · advantage $deltaText" else "",
                     style = CliTypography.CodeMono,
                     color = if (isFresh) deltaColor else CliTextTertiary,
                     maxLines = 1,
