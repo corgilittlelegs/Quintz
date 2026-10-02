@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -50,8 +51,9 @@ fun MacPolicyDialog(
                 shape = RoundedCornerShape(8.dp),
                 contentPadding = PaddingValues(20.dp),
                 modifier = Modifier
-                    .fillMaxWidth(0.92f)
-                    .widthIn(max = 440.dp)
+                    .padding(horizontal = 24.dp)
+                    .widthIn(max = 420.dp)
+                    .fillMaxWidth()
                     .clickable(enabled = false) {}
             ) {
                 Column(modifier = Modifier.fillMaxWidth()) {

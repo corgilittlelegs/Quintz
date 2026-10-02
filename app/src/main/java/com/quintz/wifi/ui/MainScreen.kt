@@ -256,8 +256,22 @@ fun MainScreen(
         }
     }
 
-    Scaffold(
-        containerColor = CliBackground,
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val configuration = LocalConfiguration.current
+        val isTablet = configuration.smallestScreenWidthDp >= 600
+        val isWideScreen = isTablet && maxWidth >= 760.dp && maxHeight >= 480.dp
+        val horizontalEdgePadding = if (isWideScreen) 20.dp else 8.dp
+
+        LaunchedEffect(isWideScreen, selectedRightPane, selectedPhoneTab) {
+            viewModel.setScannerActive(isWideScreen || selectedPhoneTab != PhoneTab.CONTROLS)
+            viewModel.setTelemetryActive(
+                if (isWideScreen) selectedRightPane == RightPaneView.GRAPH else selectedPhoneTab == PhoneTab.GRAPH
+            )
+        }
+
+        Scaffold(
+            modifier = Modifier.fillMaxSize(),
+            containerColor = CliBackground,
         contentWindowInsets = WindowInsets.systemBars,
         snackbarHost = {
             SnackbarHost(
@@ -297,7 +311,7 @@ fun MainScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                        .padding(horizontal = horizontalEdgePadding, vertical = 10.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -418,29 +432,15 @@ fun MainScreen(
             }
         }
     ) { paddingValues ->
-        BoxWithConstraints(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-        ) {
-            val configuration = LocalConfiguration.current
-            val isTablet = configuration.smallestScreenWidthDp >= 600
-            val isWideScreen = isTablet && maxWidth >= 760.dp && maxHeight >= 480.dp
-            LaunchedEffect(isWideScreen, selectedRightPane, selectedPhoneTab) {
-                viewModel.setScannerActive(isWideScreen || selectedPhoneTab != PhoneTab.CONTROLS)
-                viewModel.setTelemetryActive(
-                    if (isWideScreen) selectedRightPane == RightPaneView.GRAPH else selectedPhoneTab == PhoneTab.GRAPH
-                )
-            }
-
-            if (isWideScreen) {
-                // ── Two-Pane Mission Control (Tablets & Landscape) ──
-                Row(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 20.dp, vertical = 14.dp),
-                    horizontalArrangement = Arrangement.spacedBy(20.dp)
-                ) {
+        if (isWideScreen) {
+            // ── Two-Pane Mission Control (Tablets & Landscape) ──
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(paddingValues)
+                    .padding(horizontal = horizontalEdgePadding, vertical = 14.dp),
+                horizontalArrangement = Arrangement.spacedBy(20.dp)
+            ) {
                     // Left Pane: Telemetry & Controls
                     Column(
                         modifier = Modifier
@@ -662,7 +662,8 @@ fun MainScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(start = 8.dp, end = 8.dp, bottom = 12.dp)
+                        .padding(paddingValues)
+                        .padding(start = horizontalEdgePadding, end = horizontalEdgePadding, bottom = 12.dp)
                 ) {
                     Spacer(modifier = Modifier.height(8.dp))
 
@@ -916,8 +917,9 @@ fun MainScreen(
                     shape = RoundedCornerShape(8.dp),
                     contentPadding = PaddingValues(20.dp),
                     modifier = Modifier
-                        .fillMaxWidth(0.92f)
-                        .widthIn(max = 440.dp)
+                        .padding(horizontal = 24.dp)
+                        .widthIn(max = 420.dp)
+                        .fillMaxWidth()
                         .clickable(enabled = false) {}
                 ) {
                     Text("CONFIRM 5 GHz RADIO", style = CliTypography.TelemetryLabel, color = CliAccent5GHz)
@@ -961,8 +963,9 @@ fun MainScreen(
                     shape = RoundedCornerShape(8.dp),
                     contentPadding = PaddingValues(20.dp),
                     modifier = Modifier
-                        .fillMaxWidth(0.92f)
-                        .widthIn(max = 440.dp)
+                        .padding(horizontal = 24.dp)
+                        .widthIn(max = 420.dp)
+                        .fillMaxWidth()
                         .clickable(enabled = false) {}
                 ) {
                     Text("CONFIRM BSSID BIND", style = CliTypography.TelemetryLabel, color = CliAccent5GHz)
@@ -1061,8 +1064,9 @@ fun MainScreen(
                     shape = RoundedCornerShape(8.dp),
                     contentPadding = PaddingValues(20.dp),
                     modifier = Modifier
-                        .fillMaxWidth(0.92f)
-                        .widthIn(max = 440.dp)
+                        .padding(horizontal = 24.dp)
+                        .widthIn(max = 420.dp)
+                        .fillMaxWidth()
                         .verticalScroll(rememberScrollState())
                         .clickable(enabled = false) {}
                 ) {
@@ -1194,8 +1198,9 @@ fun MainScreen(
                     shape = RoundedCornerShape(8.dp),
                     contentPadding = PaddingValues(20.dp),
                     modifier = Modifier
-                        .fillMaxWidth(0.92f)
-                        .widthIn(max = 440.dp)
+                        .padding(horizontal = 24.dp)
+                        .widthIn(max = 420.dp)
+                        .fillMaxWidth()
                         .clickable(enabled = false) {}
                 ) {
                     Column(modifier = Modifier.fillMaxWidth()) {

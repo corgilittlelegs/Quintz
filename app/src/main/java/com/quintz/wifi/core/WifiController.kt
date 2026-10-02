@@ -318,6 +318,18 @@ class WifiController(private val context: Context) {
         freshForBssid: String?,
         previousAgesByBssid: Map<String, Long>
     ): WifiScanBatch = withContext(Dispatchers.IO) {
+        // Read a baseline before requesting a scan: a successful shell exit alone does not
+        // prove Android replaced its cache. No app location permission is needed for this path.
+        val baselineResult = ShizukuManager.exec("cmd wifi list-scan-results", correlationId = correlationId)
+        val baselineReadAt = System.currentTimeMillis()
+        val baseline = if (baselineResult.isSuccess) {
+            WifiParser.parseScanResults(baselineResult.stdout, _status.value.ssid, _status.value.bssid)
+                .associate { it.bssid.lowercase() to (baselineReadAt - it.ageSeconds * 1000L) }
+        } else {
+            previousAgesByBssid.mapValues { baselineReadAt - it.value * 1000L }
+        }
+        val completion = WifiScanCompletion(context)
+        try {
             val scanStartedAtMs = System.currentTimeMillis()
             val scanStartedElapsedMs = SystemClock.elapsedRealtime()
             val scanStart = ShizukuManager.exec("cmd wifi start-scan", correlationId = correlationId)
@@ -329,20 +341,20 @@ class WifiController(private val context: Context) {
                 return@withContext WifiScanBatch(emptyList(), System.currentTimeMillis(), SystemClock.elapsedRealtime(), false, SystemClock.elapsedRealtime() - scanStartedElapsedMs)
             }
 
-            // start-scan can return success while Android still exposes its previous results.
-            // For watchdog recovery, poll until the target SSID has a fresh 5/6 GHz observation
-            // or the bounded wait expires; age advancing naturally does not count as a refresh.
             val requiresFreshTarget = freshForSsid != null || freshForBssid != null
-            val refreshDeadlineMs = scanStartedAtMs + if (requiresFreshTarget) 12000L else 2500L
+            val deadlineElapsedMs = scanStartedElapsedMs + SCAN_REFRESH_TIMEOUT_MS
             var list = emptyList<AccessPointRadio>()
-            var targetRefreshObserved = !requiresFreshTarget
-            var firstRead = true
+            var refreshObserved = false
+            var targetRefreshObserved = false
+            var completionReported = false
             while (true) {
-                val waitMs = if (firstRead) 2500L else 1000L
-                val remainingMs = refreshDeadlineMs - System.currentTimeMillis()
-                if (remainingMs > 0L) kotlinx.coroutines.delay(minOf(waitMs, remainingMs))
-                firstRead = false
-
+                val remainingMs = deadlineElapsedMs - SystemClock.elapsedRealtime()
+                if (remainingMs > 0L) {
+                    // Read immediately on completion, otherwise poll for OEMs that suppress it.
+                    if (completion.await(minOf(SCAN_RESULT_POLL_MS, remainingMs)) == true) {
+                        completionReported = true
+                    }
+                }
                 val scanResult = ShizukuManager.exec("cmd wifi list-scan-results", correlationId = correlationId)
                 if (!scanResult.isSuccess) {
                     DiagnosticLogger.log(
@@ -351,34 +363,27 @@ class WifiController(private val context: Context) {
                     )
                     return@withContext WifiScanBatch(emptyList(), System.currentTimeMillis(), SystemClock.elapsedRealtime(), false, SystemClock.elapsedRealtime() - scanStartedElapsedMs)
                 }
-
-                val currentSsid = _status.value.ssid
-                val currentBssid = _status.value.bssid
                 val readAt = System.currentTimeMillis()
-                list = WifiParser.parseScanResults(scanResult.stdout, currentSsid, currentBssid).map { radio ->
+                list = WifiParser.parseScanResults(scanResult.stdout, _status.value.ssid, _status.value.bssid).map { radio ->
                     radio.copy(observedAtMillis = readAt - radio.ageSeconds * 1000L)
                 }
-
+                // A completion notification permits an empty successful scan. Targeted steering
+                // still requires a new observation of the requested radio, not just a broadcast.
+                refreshObserved = completionReported || hasNewScanObservation(list, baseline, scanStartedAtMs)
                 if (requiresFreshTarget) {
-                    val elapsedSeconds = ((System.currentTimeMillis() - scanStartedAtMs) / 1000L).coerceAtLeast(0L)
-                    targetRefreshObserved = list.any { radio ->
+                    val targets = list.filter { radio ->
                         val isTarget = if (!freshForBssid.isNullOrBlank()) {
                             radio.bssid.equals(freshForBssid, ignoreCase = true) && (freshForSsid == null || radio.ssid == freshForSsid)
                         } else {
                             radio.ssid == freshForSsid &&
-                                    (radio.band == BandType.BAND_5_GHZ || radio.band == BandType.BAND_6_GHZ)
+                                (radio.band == BandType.BAND_5_GHZ || radio.band == BandType.BAND_6_GHZ)
                         }
-                        if (!isTarget || radio.ageSeconds > 8L) {
-                            false
-                        } else {
-                            val previousAge = previousAgesByBssid[radio.bssid.lowercase()]
-                            previousAge == null || radio.ageSeconds < previousAge + elapsedSeconds
-                        }
+                        isTarget && radio.ageSeconds <= 8L
                     }
+                    targetRefreshObserved = hasNewScanObservation(targets, baseline, scanStartedAtMs)
                 }
-
-                val nowMs = System.currentTimeMillis()
-                if (targetRefreshObserved || nowMs >= refreshDeadlineMs) break
+                val requestSatisfied = if (requiresFreshTarget) targetRefreshObserved else refreshObserved
+                if (requestSatisfied || SystemClock.elapsedRealtime() >= deadlineElapsedMs) break
             }
 
             val usableList = if (requiresFreshTarget && !targetRefreshObserved) {
@@ -389,21 +394,21 @@ class WifiController(private val context: Context) {
                 list.filterNot {
                     if (!freshForBssid.isNullOrBlank()) it.bssid.equals(freshForBssid, ignoreCase = true)
                     else it.ssid == freshForSsid &&
-                            (it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ)
+                        (it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ)
                 }
-            } else {
-                list
-            }
-
-            _radios.value = usableList
-            lastScanCompletedTimestamp = System.currentTimeMillis()
+            } else list
+            val completedAtMs = System.currentTimeMillis()
             val durationMillis = SystemClock.elapsedRealtime() - scanStartedElapsedMs
-            val batch = WifiScanBatch(usableList, lastScanCompletedTimestamp, SystemClock.elapsedRealtime(), true, durationMillis)
+            val succeeded = if (requiresFreshTarget) targetRefreshObserved else refreshObserved
             DiagnosticLogger.log(
                 "WIFI_SCAN",
-                "id=${correlationId ?: "none"} result=completed radios=${usableList.size} targetSsid='${freshForSsid.orEmpty()}' targetRefreshObserved=$targetRefreshObserved durationMs=$durationMillis waitedMs=${lastScanCompletedTimestamp - scanStartedAtMs} completedAtMs=$lastScanCompletedTimestamp"
+                "id=${correlationId ?: "none"} result=${if (succeeded) "completed" else "not_refreshed"} radios=${usableList.size} targetSsid='${freshForSsid.orEmpty()}' targetRefreshObserved=$targetRefreshObserved completionReported=$completionReported durationMs=$durationMillis completedAtMs=$completedAtMs"
             )
-            batch
+            WifiScanBatch(usableList, completedAtMs, SystemClock.elapsedRealtime(), succeeded, durationMillis)
+        } finally {
+            // Also unregister on cancellation, failed shell commands, and timeout.
+            completion.close()
+        }
     }
 
     private suspend fun ensureProfileUnpinned(

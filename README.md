@@ -50,7 +50,10 @@ Quintz leverages the **[Shizuku](https://shizuku.rikka.app)** privileged API bri
 
 ### 📊 Real-Time Roaming & RF Telemetry Monitor
 - Rolling graphs for active connection RSSI and PHY link speed over the last minute.
-- **Multi-AP Roaming Crossover Detection**: Plots recent same-network candidate scan readings as discrete points, and marks readings too old for a live comparison as stale.
+- Connected signal and link-speed cursors stay at NOW, holding the latest value between readings; the cursor disappears if observations stop for more than 7.5 seconds.
+- **Multi-AP Roaming Crossover Detection**: Plots recent same-network candidate scan readings as thin lines with dots at measured observations. Measured lines break across gaps longer than 20 seconds or channel/band changes. A lighter dashed tail holds the last known value to NOW; its dot stays at the actual observation time. Readings too old for a live comparison are marked stale, with dimmer held tails.
+- Candidate scans consume Android's scan-completion notifications, with bounded polling when notifications are unavailable. Foreground scanning pauses briefly after success and backs off when results do not refresh. Candidate rows show observation age; they are not one-second live measurements.
+- This scan path supports Android 10+ (the app's minimum version) through Shizuku. Scan latency and availability depend on Android, OEM firmware, and Wi-Fi hardware; neither scan requests nor completion notifications guarantee a fresh reading of every AP.
 - **Color-Coded RF Quality Bands**: Visual thresholds for Optimal (`> -65 dBm`), Evaluation (`-65 to -75 dBm`), and Roam / Weak (`< -75 dBm`) zones.
 - **Automated Handoff Event Tracking**: Drops timestamped event pins whenever band or BSSID transitions take place.
 - **Interactive AP Legend**: Instant 1-tap BSSID locking directly from the telemetry monitor.

@@ -14,6 +14,7 @@ import androidx.lifecycle.viewModelScope
 import com.quintz.wifi.R
 import com.quintz.wifi.core.DiagnosticLogger
 import com.quintz.wifi.core.WifiController
+import com.quintz.wifi.core.foregroundScanDelayMillis
 import com.quintz.wifi.core.WifiSecurityPolicy
 import com.quintz.wifi.data.Preferences
 import com.quintz.wifi.data.WifiTargetMode
@@ -277,12 +278,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun startScannerPolling() {
         if (scannerJob?.isActive == true) return
         scannerJob = viewModelScope.launch {
+            var consecutiveFailures = 0
             while (isActive) {
                 if (isForeground && ShizukuManager.isReady() && !controller.isOperating.value &&
                     !controller.isScanning.value && !controller.isScanQueued.value) {
                     controller.scanRadios()
+                    consecutiveFailures = if (controller.lastScanSucceeded) 0 else (consecutiveFailures + 1).coerceAtMost(3)
                 }
-                delay(8500) // ~10s total cycle time (1.5s scan + 8.5s rest)
+                delay(foregroundScanDelayMillis(consecutiveFailures))
             }
         }
     }
@@ -458,12 +461,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             status.observedAtMillis <= lastRecordedStatusObservationMillis
         ) {
             val samples = synchronized(telemetryBuffer) {
-                while (telemetryBuffer.isNotEmpty() && telemetryBuffer.first().timestamp < now - 60_000L) {
+                while (telemetryBuffer.isNotEmpty() && telemetryBuffer.first().timestamp < now - TELEMETRY_HISTORY_RETENTION_MS) {
                     telemetryBuffer.removeFirst()
                 }
                 telemetryBuffer.toList()
             }
-            val rssiValues = samples.map { it.activeRssi }.filter { it in -120..-10 }
+            val rssiValues = samples.filter { it.timestamp in (now - TELEMETRY_WINDOW_MS)..now }
+                .map { it.activeRssi }.filter { it in -120..-10 }
             _telemetryState.value = baseState.copy(
                 samples = samples,
                 minRssi = rssiValues.minOrNull() ?: status.rssi,
@@ -505,14 +509,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         synchronized(telemetryBuffer) {
             telemetryBuffer.addLast(sample)
             while (telemetryBuffer.size > maxTelemetrySamples ||
-                (telemetryBuffer.firstOrNull()?.timestamp ?: now) < now - 60_000L
+                (telemetryBuffer.firstOrNull()?.timestamp ?: now) < now - TELEMETRY_HISTORY_RETENTION_MS
             ) {
                 telemetryBuffer.removeFirst()
             }
         }
 
         val sampleList = synchronized(telemetryBuffer) { telemetryBuffer.toList() }
-        val rssiValues = sampleList.map { it.activeRssi }.filter { it in -120..-10 }
+        val rssiValues = sampleList.filter { it.timestamp in (now - TELEMETRY_WINDOW_MS)..now }
+            .map { it.activeRssi }.filter { it in -120..-10 }
         val minRssi = rssiValues.minOrNull() ?: status.rssi
         val maxRssi = rssiValues.maxOrNull() ?: status.rssi
 
