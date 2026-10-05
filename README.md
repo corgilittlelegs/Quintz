@@ -1,8 +1,8 @@
 # Quintz ⚡
 
-> **Tactical Wi-Fi Band Locker, BSSID Steering & RF Direction Finder for Android.**
+> **Wi-Fi Band Preference, BSSID Pinning & RF Telemetry for Android.**
 
-[![Platform](https://img.shields.io/badge/Platform-Android%2010%2B%20(API%2029--35)-3DDC84?style=flat-square&logo=android)](https://developer.android.com)
+[![Platform](https://img.shields.io/badge/Platform-Android%2010%2B%20(API%2029%2B)-3DDC84?style=flat-square&logo=android)](https://developer.android.com)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0+-7F52FF?style=flat-square&logo=kotlin)](https://kotlinlang.org)
 [![Compose](https://img.shields.io/badge/UI-Jetpack%20Compose-4285F4?style=flat-square&logo=jetpackcompose)](https://developer.android.com/jetpack/compose)
 [![Privilege](https://img.shields.io/badge/Privilege-Shizuku%20(No%20Root)-00C853?style=flat-square)](https://shizuku.rikka.app)
@@ -12,25 +12,27 @@
 
 ## Overview
 
-**Quintz** is a high-performance, rootless Wi-Fi utility designed to solve one of Android's most notorious wireless connectivity issues: **sticky 2.4 GHz roaming on dual-band and mesh networks**.
+**Quintz** is a rootless Wi-Fi utility for choosing radios and monitoring connections on dual-band and mesh networks.
 
-Modern routers broadcast both 2.4 GHz and 5 GHz (or 6 GHz) under a unified SSID. While 5 GHz delivers gigabit speeds and ultra-low latency, Android’s default roaming logic is notoriously conservative. Once your device steps down to 2.4 GHz, it will stubbornly remain connected to the slower, congested band—even when you walk right back next to the router.
+Routers can broadcast 2.4 GHz, 5 GHz, and 6 GHz under one SSID. Android may remain on a 2.4 GHz radio after a stronger higher-band radio becomes available. Quintz lets you prefer 5/6 GHz, pin a specific BSSID, or return a network to normal auto-roaming.
 
-Quintz leverages the **[Shizuku](https://shizuku.rikka.app)** privileged API bridge to lock Android directly to the 5 GHz / 6 GHz radio of your network **without needing root access**, while providing real-time AP telemetry, automated fallback protection, and a real-time roaming & RF telemetry monitor.
+Quintz uses **[Shizuku](https://shizuku.rikka.app)** to access Android's Wi-Fi service **without requiring root**. It combines per-network steering intent, a background recovery watchdog, an AP scanner, and rolling RF telemetry. Available bands and successful transitions depend on the device, router, and Android Wi-Fi implementation.
 
 ---
 
 ## Key Features
 
 ### 🔒 1-Tap 5 GHz Preference (No Root Required)
+
 - Selects a strong 5 GHz / 6 GHz BSSID on your network, then keeps the saved profile available for roaming.
 - The preferred-band action is not a permanent BSSID pin: Android and the Wi-Fi firmware can still roam to another BSSID or band when conditions require it.
 - Use a specific BSSID lock when you need to keep the profile pinned to one access point.
 - Quintz stores Auto, Prefer 5 GHz, or Pin BSSID intent per SSID, so changing one network does not change the watchdog target for another.
 - Supports WPA2-Personal, WPA3-SAE, Enhanced Open (OWE), and open networks.
-- Uses Shizuku to interface safely with Android's system Wi-Fi service.
+- Profile changes require a compatible Android Wi-Fi framework and authorized Shizuku access.
 
 ### 🛡️ Smart Fallback Watchdog
+
 - Runs as a foreground service and checks the connected band while the watchdog is enabled and Shizuku is available.
 - The 5 GHz preference leaves the saved profile unpinned so Android or device firmware can roam to 2.4 GHz when needed. The watchdog does not trigger an unlock at a particular 5 GHz RSSI value.
 - When the device is connected to the target SSID on 2.4 GHz, the watchdog scans for a same-SSID 5 GHz / 6 GHz BSSID. The default recovery threshold is `-72 dBm`.
@@ -38,17 +40,19 @@ Quintz leverages the **[Shizuku](https://shizuku.rikka.app)** privileged API bri
 - Recovery requires the same eligible BSSID in two fresh observations at least 10 seconds apart. If confirmed, Quintz requests a BSSID-specific transition, verifies that the target BSSID became active, then unpins the saved profile again so roaming remains allowed.
 - For a pinned network, the watchdog monitors and restores that exact BSSID (on either band), then verifies the hard profile pin. Auto mode does not trigger band or BSSID recovery.
 - The recovery scan interval starts at about 12 seconds and backs off to 30 seconds when no eligible candidate is found or a recovery attempt fails. Failed switch attempts also receive a retry cooldown that increases from 60 seconds up to 5 minutes.
-- Recovery for secured networks requires Quintz to have the network password saved. A missing password, unavailable Shizuku service, stale scan results, or Android/OEM behavior can prevent or delay a switch; recovery is not guaranteed to be seamless.
+- Automatic recovery checks fresh observations and trusted security information. Secured networks require a saved password; open and OWE networks require an explicit trusted radio choice instead of automatic same-name band selection.
+- Missing credentials, unavailable Shizuku, stale results, profile recovery conflicts, or Android/OEM behavior can prevent or delay a switch. Recovery can interrupt the connection.
 
-### ⚙️ How BSSID Pinning Works & Technical Realities
-- **The Mechanism**: Quintz configures Android's saved network profile using `cmd wifi connect-network <SSID> <sec> [pass] -b <BSSID> -r <none|persistent>` via Shizuku. This tells Android's `WifiConfigManager` to restrict candidate selection to the designated hardware BSSID.
-- **Per-Network MAC Policy**: Supports Device MAC (`-r none`) for router DHCP static reservations or Randomized MAC (`-r persistent`) for privacy.
-- **OEM & Firmware Realities**:
-  - In Android, Qualcomm Wi-Fi driver firmware (`wlan_driver`) and OEM layers (e.g., Samsung's *Intelligent Wi-Fi* / `SemWifi`) retain autonomous driver-level roaming authority.
-  - If RF signal degrades severely or the router issues IEEE 802.11k/v BSS transition management frames, the underlying Wi-Fi chip may autonomously reassociate to 2.4 GHz.
-  - **Why the Watchdog Helps**: Because no user-space application can completely override kernel/firmware roaming decisions, Quintz's Watchdog detects when the active connection is on 2.4 GHz and attempts a verified transition to a strong same-network 5 GHz / 6 GHz BSSID when RF conditions permit. It then restores the unpinned profile so normal roaming can continue.
+### ⚙️ How BSSID Pinning Works
+
+- **Saved-profile changes**: A Shizuku user service reads and updates Android's Wi-Fi configuration, sets or clears its BSSID pin, and requests reassociation. Status and scan paths also use `cmd wifi` and `dumpsys wifi` where appropriate.
+- **Verification and recovery**: Before changing a profile, Quintz saves an encrypted recovery record. It checks profile readback and the resulting connection before committing the new intent. Failed or interrupted transitions attempt to restore the previous profile and app settings; a changed or unverifiable profile can leave recovery pending.
+- **Per-network MAC policy**: Shows Android's configured Device MAC or persistent Randomized MAC, separately from Quintz's saved preference and the observed address. Choosing the configured policy does nothing. In Auto mode, a change updates the saved Android profile for the next connection without issuing a reconnect. With an active BSSID pin or 5 GHz preference, Quintz reconnects the same network, keeps that mode and pin, and verifies the observed MAC. Router reservations can be affected.
+- **Separate password storage**: The password status shows whether Quintz has its own encrypted copy, independently of Android's saved network. MAC-only changes reuse Android's existing profile and do not require a password copy in Quintz. Forgetting the Quintz copy leaves Android's saved network intact.
+- **Device limits**: A saved-profile pin cannot guarantee uninterrupted association. The watchdog attempts to restore the selected BSSID for Pin BSSID intent, or return to an eligible 5/6 GHz radio for Prefer 5 GHz intent.
 
 ### 📊 Real-Time Roaming & RF Telemetry Monitor
+
 - Rolling graphs for active connection RSSI and PHY link speed over the last minute.
 - Connected signal and link-speed cursors stay at NOW, holding the latest value between readings; the cursor disappears if observations stop for more than 7.5 seconds.
 - **Multi-AP Roaming Crossover Detection**: Plots recent same-network candidate scan readings as thin lines with dots at measured observations. Measured lines break across gaps longer than 20 seconds or channel/band changes. A lighter dashed tail holds the last known value to NOW; its dot stays at the actual observation time. Readings too old for a live comparison are marked stale, with dimmer held tails.
@@ -56,45 +60,58 @@ Quintz leverages the **[Shizuku](https://shizuku.rikka.app)** privileged API bri
 - This scan path supports Android 10+ (the app's minimum version) through Shizuku. Scan latency and availability depend on Android, OEM firmware, and Wi-Fi hardware; neither scan requests nor completion notifications guarantee a fresh reading of every AP.
 - **Color-Coded RF Quality Bands**: Visual thresholds for Optimal (`> -65 dBm`), Evaluation (`-65 to -75 dBm`), and Roam / Weak (`< -75 dBm`) zones.
 - **Automated Handoff Event Tracking**: Drops timestamped event pins whenever band or BSSID transitions take place.
-- **Interactive AP Legend**: Instant 1-tap BSSID locking directly from the telemetry monitor.
+- **Candidate actions**: Bind to an eligible radio from the telemetry monitor. Cached history remains visible for up to a minute, but a live comparison requires a recent observation from the latest scan; displaying a radio does not make it actionable.
 
 ### 📊 AP Scanner & Channel Analyzer
+
 - Scans and lists all nearby access points, frequencies, channel numbers, and MACs.
 - Clear indicators for Wi-Fi standards (**11n**, **11ac**, **11ax**, **Wi-Fi 7**).
-- 1-tap **`BIND`** button to pin connection to any specific radio or access point; the connected AP stays actionable until it is actually pinned. Rows distinguish **CONNECTED** from **PINNED**.
+- Rows distinguish **ACTIVE** (the connected radio) from **PINNED** (the saved target).
+- Actions show **`PIN`** for the active unpinned radio, **`UNPIN`** for a pinned radio, and **`BIND`** for other eligible radios. A saved pin can be cleared even when that radio is not the active connection.
 
 ### ⚡ Quick Settings Tile
-- 1-tap lock and unlock directly from the Android Quick Settings shade without launching the full application.
-- Real-time subtitle status shows the active locked channel and band.
 
-### 🔋 Battery & Resource Optimized
-- **Zero background shell execution** when the app is idle or minimized.
-- Network callbacks are foreground-gated and strictly throttled.
-- Canvas graphics allocations are pre-cached, eliminating garbage collection pauses during 60/120 FPS animations.
+- Switches an Auto network to Prefer 5 GHz, or returns a steered/pinned network to Auto from the Quick Settings shade.
+- Requires authorized Shizuku and saved credentials for secured-network preference. Missing credentials or an open/OWE network's explicit radio selection opens the app.
+- The subtitle shows connection/steering status. Returning the last steered network to Auto stops the watchdog; other saved targets can keep it enabled.
+
+### 🔋 Background Work & Resource Use
+
+- UI status polling, scanning, and telemetry stop when the app leaves the foreground. Scanner and telemetry work also follow the selected screen and telemetry pause state.
+- An enabled watchdog continues status checks and recovery scans in its foreground service while the app is minimized. It uses scan backoff and switch cooldowns, and stops when no saved steering targets remain.
+- Graph drawing caches reusable geometry and text measurements. Smooth animation preserves measurement timestamps; it does not create extra RF readings or guarantee a particular frame rate or battery cost.
 
 ---
 
 ## Prerequisites
 
-- **Android 10** (API 29) through **Android 15 / 16** (API 35+).
+- **Android 10 or later** (minimum API 29; compile/target SDK 35).
 - **[Shizuku](https://shizuku.rikka.app)** (v13+ recommended).
+- Profile capture and mutation currently allow SDK 29–36 and require successful runtime capability checks. This range does not establish compatibility with every device or manufacturer. WEP, enterprise Wi-Fi, Passpoint, ambiguous profiles, and unavailable profile credentials are not supported by the full profile-change path.
 
 ### Why Shizuku?
 Since Android 10, Google restricted third-party applications from programmatically managing Wi-Fi networks and BSSID associations. Shizuku runs a privileged system service that lets user apps execute authorized system shell commands without modifying Android system files or rooting your device.
 
-**Setting up Shizuku takes ~1 minute on your device:**
-1. Install [Shizuku from Google Play](https://play.google.com/store/apps/details?id=moe.shizuku.privileged.api) or GitHub.
-2. Open Shizuku and follow the on-screen steps to start it via **Wireless Debugging** (no computer required).
-3. Open **Quintz** and tap **GRANT** when prompted.
+**Set up Shizuku:**
+
+1. Install [Shizuku from Google Play](https://play.google.com/store/apps/details?id=moe.shizuku.privileged.api) or its [official GitHub releases](https://github.com/RikkaApps/Shizuku/releases).
+2. On **Android 11+**, follow Shizuku's wireless-debugging pairing and startup steps. On **unrooted Android 10**, start it through ADB from a computer. See the [official setup guide](https://shizuku.rikka.app/guide/setup/).
+3. Open **Quintz** and grant Shizuku access when prompted.
+
+With either non-root startup method, Shizuku must be started again after a device reboot. Android battery restrictions or loss of Shizuku access can interrupt watchdog recovery.
 
 ---
 
 ## Building from Source
 
 ### Requirements
+
 - **JDK 21**
-- **Android SDK** (API 35, Build Tools 35.0.0+)
+- **Android SDK Platform 35** and **Build Tools 35.0.0** (used by release signing)
 - **Git**
+- **Android SDK Platform Tools / ADB** for device installation and tests
+
+Configure the SDK location using Android Studio or an ignored `local.properties` file with `sdk.dir`. The repository includes the Gradle wrapper.
 
 ### Steps
 
@@ -104,15 +121,66 @@ Since Android 10, Google restricted third-party applications from programmatical
    cd Quintz
    ```
 
-2. **Build the release APK:**
+2. **Build an installable debug APK:**
    ```bash
-   ./gradlew assembleRelease
+   ./gradlew :app:assembleDebug
    ```
 
 3. **Install to your connected device via ADB:**
    ```bash
-   adb install -r app/build/outputs/apk/release/app-release.apk
+   adb install -r app/build/outputs/apk/debug/app-debug.apk
    ```
+
+Debug builds use package ID `com.quintz.wifi.debug` and can coexist with the release package `com.quintz.wifi`. Updating a debug installation requires the same debug signing key.
+
+### Release Builds & Signing
+
+```bash
+./gradlew :app:assembleRelease
+```
+
+This produces `app/build/outputs/apk/release/app-release-unsigned.apk`, which must be signed before installation. Release builds enable R8 code and resource shrinking. The manual release workflow supplies version values and signs the APK using externally supplied legacy/rotated keys and their signing lineage. Follow [release signing](docs/release-signing.md) for the required environment variables and GitHub secrets, and [release versioning](docs/release-versioning.md) for version/tag behavior.
+
+Local signing material belongs in the ignored `keystore/` directory and must be backed up separately. Gradle does not fall back to debug signing for release builds.
+
+### Verification
+
+Run the same build, unit-test, and lint gate as the verification workflow:
+
+```bash
+./gradlew :app:testDebugUnitTest :app:testReleaseUnitTest \
+  :app:lintDebug :app:lintRelease \
+  :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleRelease \
+  --no-daemon --console=plain
+```
+
+Run Android instrumentation tests with a connected device or emulator:
+
+```bash
+./gradlew :app:connectedDebugAndroidTest --no-daemon --console=plain
+```
+
+Some profile-access/recovery tests require authorized Shizuku and specific device state, and skip when those prerequisites are absent. Passing the CI emulator tests does not verify real Wi-Fi reassociation, OEM compatibility, signed upgrades, or battery use.
+
+## GitHub Actions
+
+| Workflow | Trigger | Result |
+| --- | --- | --- |
+| [Verify app](.github/workflows/verify.yml) | Push to `main` or pull request | Unit tests, lint, both build variants, instrumentation packaging, and Android emulator tests |
+| [Build Debug APK](.github/workflows/debug-apk.yml) | Manual **Run workflow** | An installable debug APK in the completed run's **Artifacts** section; retained for 14 days |
+| [Release APK](.github/workflows/release.yml) | Manual **Run workflow** on `main`, with `patch`, `minor`, or `major` | Tests/lint, release build, external signing, and a public GitHub release with APK and SHA-256 checksum |
+
+Commit and sync the intended changes before running a manual build. The debug workflow uses optional `DEBUG_KEYSTORE_BASE64` for a stable debug key; without it, its temporary key may prevent installing a later run over an existing debug build. Download and extract the `Quintz-debug-<run number>` artifact ZIP to obtain the APK.
+
+Syncing code does not publish a release. Release signing secrets must be configured first; the workflow rejects missing signing material and checks that `main` still matches the release commit before publishing. The optional `./release.sh [patch|minor|major]` command dispatches the same release workflow through GitHub CLI.
+
+## Debug Diagnostics
+
+Debug builds include a diagnostics button in the app header. Open **DIAGNOSTICS (DEBUG)** and choose **COPY** for the current report, **EXPORT** to share a flight-recorder ZIP through Android's chooser, or **CLEAR** to clear recorded logs.
+
+The recorder stores local diagnostic events, watchdog heartbeats, and available process-exit information. An unobserved interval records a gap with an unknown cause; it does not by itself prove a reboot or continuous monitoring. Release builds disable this recorder and its sharing UI.
+
+Exports redact credential-bearing command arguments and recognized password fields, but include network names, BSSIDs, device details, and connection history. Review the archive before sharing it. Profile recovery payloads are kept separately in encrypted private storage and are not exported.
 
 ---
 
@@ -120,16 +188,18 @@ Since Android 10, Google restricted third-party applications from programmatical
 
 - **Architecture**: MVVM with unidirectional data flow (UDF) via Kotlin Coroutines and `StateFlow`.
 - **UI Framework**: 100% Jetpack Compose with Material 3 and custom industrial cyber-tactical CLI design tokens.
-- **Sensors**: Hardware sensor fusion (`Sensor.TYPE_ROTATION_VECTOR`) with orientation coordinate remapping across portrait and landscape layouts (`SensorManager.remapCoordinateSystem`).
 - **Security**: Local network credentials encrypted using AndroidX `EncryptedSharedPreferences`.
-- **System Integration**: Shizuku IPC binder bridge to `cmd wifi` and `dumpsys wifi` system services.
+- **Profile Recovery**: Encrypted durable recovery records, profile fingerprint/readback checks, and verified transition commits.
+- **System Integration**: Shizuku user-service IPC for Wi-Fi profile access, plus bounded shell execution for status, scans, and system integration.
 
 ---
 
-## Privacy & Security Guarantee
+## Privacy & Security
 
-- **100% Offline**: Quintz contains **no tracking**, **no analytics**, **no ads**, and makes **no internet network requests**.
-- **Local Credentials**: Any Wi-Fi passwords entered are saved exclusively on your local device within hardware-backed encrypted storage (`EncryptedSharedPreferences`).
+- **Local operation**: Wi-Fi steering and telemetry do not require a Quintz server. The app has no analytics or advertising integration. It requests Inter and JetBrains Mono from Google Play services' downloadable-font provider, which may fetch fonts over the network when they are not cached; see [Android's downloadable-font documentation](https://developer.android.com/develop/ui/views/text-and-emoji/downloadable-fonts).
+- **Local credentials**: Wi-Fi passwords use `EncryptedSharedPreferences` with an Android Keystore key. Hardware backing depends on the device and is not guaranteed by this configuration. Password saving is refused when secure storage is unavailable.
+- **Backup exclusions**: Credential/settings preference files are excluded from Android cloud backup and device transfer. Profile recovery records and flight-recorder journals use private storage excluded from backup.
+- **User-controlled sharing**: Debug reports are shared only through an explicit copy/export action; they can contain network and device identifiers.
 - **Open Source**: Full source code is available for audit and verification.
 
 ---

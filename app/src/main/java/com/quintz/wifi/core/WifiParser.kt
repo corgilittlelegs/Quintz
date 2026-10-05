@@ -19,10 +19,11 @@ object WifiParser {
 
     /** Reads identity fields from dumpsys output even when it omits connection-state markers. */
     fun parseConnectionIdentity(output: String): Pair<String, String> {
-        val rawSsid = SSID_REGEX.find(output)?.groupValues?.get(1)?.trim().orEmpty()
+        val rawSsid = SSID_REGEX.find(output)?.groupValues?.get(1).orEmpty()
         val ssid = rawSsid.takeUnless {
             it.equals("<unknown ssid>", ignoreCase = true) || it.equals("<none>", ignoreCase = true)
         }.orEmpty()
+        if (rawSsid.contains('\\') || Regex("SSID:\\s*\"[^\"]*\"[^,\\n]*\"").containsMatchIn(output)) return "" to ""
         val bssid = BSSID_REGEX.find(output)?.groupValues?.get(1).orEmpty()
         return ssid to bssid
     }
@@ -37,7 +38,7 @@ object WifiParser {
             return WifiStatus(isConnected = false)
         }
 
-        var ssid = SSID_REGEX.find(statusOutput)?.groupValues?.get(1)?.trim('"')?.trim().orEmpty()
+        var ssid = SSID_REGEX.find(statusOutput)?.groupValues?.get(1).orEmpty()
         if (ssid == "<unknown ssid>" || ssid == "<none>") ssid = ""
 
         if (ssid.isEmpty()) {
@@ -134,13 +135,13 @@ object WifiParser {
                 // Parse RSSI which can be formatted as "-64(0:-64)" or "-64"
                 val rssiRaw = parts[2].substringBefore('(')
                 val rssi = rssiRaw.toIntOrNull() ?: -99
-                if (rssi <= -127) continue
+                if (rssi !in -126..-1) continue
 
                 // Parse Age in seconds and enforce scan freshness.
                 // Fail closed (Long.MAX_VALUE) if age is unparseable or missing.
-                val ageSeconds = parts[3].toDoubleOrNull()?.toLong()
-                    ?: parts[3].substringBefore('.').toLongOrNull()
-                    ?: Long.MAX_VALUE
+                val age = parts[3].toDoubleOrNull() ?: continue
+                if (!age.isFinite() || age < 0 || age > Long.MAX_VALUE / 1000.0) continue
+                val ageSeconds = kotlin.math.ceil(age).toLong()
                 if (maxAgeSeconds != null && ageSeconds > maxAgeSeconds) {
                     continue // Reject stale cached scan results
                 }
@@ -180,7 +181,7 @@ object WifiParser {
 
         // Deduplicate by BSSID, keeping the strongest RSSI entry
         val deduplicated = results.groupBy { it.bssid.lowercase() }
-            .map { (_, list) -> list.maxByOrNull { it.rssi } ?: list.first() }
+            .map { (_, list) -> list.sortedWith(compareBy<AccessPointRadio> { it.ageSeconds }.thenByDescending { it.rssi }).first() }
 
         // Sort priority:
         // 1. Currently connected radio first (if connected)

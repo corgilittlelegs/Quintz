@@ -28,12 +28,7 @@ object ShizukuManager {
     private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
     const val REQUEST_CODE_SHIZUKU_PERMISSION = 7001
 
-    private val shellExecutor = Executors.newCachedThreadPool { runnable ->
-        Thread(runnable).apply {
-            isDaemon = true
-            name = "shizuku-worker"
-        }
-    }
+    private val shellRunner = BoundedShellRunner()
 
     private val _state = MutableStateFlow(ShizukuState())
     val state: StateFlow<ShizukuState> = _state.asStateFlow()
@@ -172,91 +167,20 @@ object ShizukuManager {
         return "'" + arg.replace("'", "'\\''") + "'"
     }
 
-    fun exec(command: String, timeoutSeconds: Long = 12, correlationId: String? = null): ShellResult {
-        val tag = "Shizuku"
-        if (!isReady()) {
-            android.util.Log.w(tag, "exec called but Shizuku not ready: ${_state.value}")
-            val correlation = correlationId?.let { " id=$it" }.orEmpty()
-            DiagnosticLogger.log("CMD", "✗ Blocked (Shizuku not ready)$correlation: ${DiagnosticLogger.commandName(command)}")
-            return ShellResult(-1, "", "Shizuku service not available or permission denied")
-        }
-        val method = newProcessMethod ?: return ShellResult(-1, "", "newProcess method unavailable")
-
-        val startTime = System.currentTimeMillis()
+    suspend fun exec(command: String, timeoutSeconds: Long = 12, correlationId: String? = null, onStarted: (() -> Unit)? = null): ShellResult {
+        if (!isReady()) return ShellResult(-1, "", "Shizuku access unavailable")
+        val method = newProcessMethod ?: return ShellResult(-1, "", "Process API unavailable")
+        val start = android.os.SystemClock.elapsedRealtime()
         return try {
-            android.util.Log.d(tag, "executing command${correlationId?.let { " id=$it" }.orEmpty()}: ${DiagnosticLogger.commandName(command)}")
-            val process = method.invoke(
-                null,
-                arrayOf("sh", "-c", command),
-                null,
-                null
-            ) as Process
-
-            val stdoutBuilder = StringBuilder()
-            val stderrBuilder = StringBuilder()
-
-            // Read stdout and stderr concurrently via shared thread pool to prevent pipe buffer deadlock
-            val stdoutFuture = shellExecutor.submit {
-                process.inputStream.bufferedReader().useLines { lines ->
-                    lines.forEach { line -> stdoutBuilder.appendLine(line) }
-                }
+            val result = shellRunner.run(timeoutSeconds * 1000L) {
+                (method.invoke(null, arrayOf("sh", "-c", command), null, null) as Process).also { onStarted?.invoke() }
             }
-
-            val stderrFuture = shellExecutor.submit {
-                process.errorStream.bufferedReader().useLines { lines ->
-                    lines.forEach { line -> stderrBuilder.appendLine(line) }
-                }
-            }
-
-            val waitFuture = shellExecutor.submit<Int> {
-                try {
-                    process.waitFor()
-                } catch (_: Exception) {
-                    -1
-                }
-            }
-
-            val code = try {
-                waitFuture.get(timeoutSeconds, TimeUnit.SECONDS)
-            } catch (e: TimeoutException) {
-                val correlation = correlationId?.let { " id=$it" }.orEmpty()
-                android.util.Log.w(tag, "Command timed out after ${timeoutSeconds}s$correlation: ${DiagnosticLogger.commandName(command)}")
-                try { process.destroy() } catch (_: Exception) {}
-                waitFuture.cancel(true)
-                stdoutFuture.cancel(true)
-                stderrFuture.cancel(true)
-                val duration = System.currentTimeMillis() - startTime
-                DiagnosticLogger.log("CMD", "✗ Timeout after ${duration}ms$correlation: ${DiagnosticLogger.commandName(command)}")
-                return ShellResult(-1, "", "Command timed out after ${timeoutSeconds}s")
-            }
-
-            try {
-                stdoutFuture.get(1, TimeUnit.SECONDS)
-                stderrFuture.get(1, TimeUnit.SECONDS)
-            } catch (e: Exception) {
-                stdoutFuture.cancel(true)
-                stderrFuture.cancel(true)
-                if (e is InterruptedException) Thread.currentThread().interrupt()
-                DiagnosticLogger.log("CMD", "✗ Output read failed: ${DiagnosticLogger.commandName(command)} (${e.javaClass.simpleName})")
-                return ShellResult(-1, "", "Failed to read command output: ${e.javaClass.simpleName}")
-            }
-
-            val stdout = stdoutBuilder.toString().trim()
-            val stderr = stderrBuilder.toString().trim()
-            val duration = System.currentTimeMillis() - startTime
-            DiagnosticLogger.logCommand(command, code, duration, correlationId)
-            android.util.Log.d(
-                tag,
-                "command completed ($code)${correlationId?.let { " id=$it" }.orEmpty()}, stdout length: ${stdout.length}, stderr length: ${stderr.length}"
-            )
-            ShellResult(code, stdout, stderr)
-        } catch (e: Exception) {
-            val duration = System.currentTimeMillis() - startTime
-            val correlation = correlationId?.let { " id=$it" }.orEmpty()
-            DiagnosticLogger.log("CMD", "✗ Exception (${duration}ms)$correlation: ${e.javaClass.simpleName} on ${DiagnosticLogger.commandName(command)}")
-            android.util.Log.e(tag, "Command execution error (${DiagnosticLogger.commandName(command)}): ${e.javaClass.simpleName}")
-            ShellResult(-1, "", "Command execution error")
-        }
+            DiagnosticLogger.logCommand(command, result.exitCode, android.os.SystemClock.elapsedRealtime() - start, correlationId)
+            result
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            if (e !is kotlinx.coroutines.TimeoutCancellationException) throw e
+            ShellResult(-1, "", "Command deadline expired")
+        } catch (_: Exception) { ShellResult(-1, "", "Command execution failed") }
     }
 
     private fun isPackageInstalled(context: Context, packageName: String): Boolean {

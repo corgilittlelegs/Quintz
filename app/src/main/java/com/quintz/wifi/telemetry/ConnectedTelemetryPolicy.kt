@@ -10,7 +10,7 @@ fun connectedTelemetryObservation(native: WifiStatus, verified: WifiStatus, now:
         return native.copy(observedAtMillis = now)
     }
     if (!verified.isConnected || verified.ssid.isEmpty() || verified.bssid.isEmpty() ||
-        now - verified.observedAtMillis !in 0L..5_000L ||
+        now - (verified.identityObservedAtMillis.takeIf { it > 0L } ?: verified.observedAtMillis) !in 0L..5_000L ||
         native.networkId == null || native.networkId != verified.networkId ||
         native.frequency <= 0 || native.frequency != verified.frequency) return null
     return native.copy(ssid = verified.ssid, bssid = verified.bssid, observedAtMillis = now)

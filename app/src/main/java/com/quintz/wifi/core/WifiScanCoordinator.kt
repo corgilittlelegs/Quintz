@@ -24,6 +24,7 @@ internal object WifiScanCoordinator {
     private val _isScanning = MutableStateFlow(false)
     val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
     private var lastSuccessfulScan: WifiScanBatch? = null
+    @Volatile private var lastStartedElapsedMillis = -1_500L
     private var totalRequests = 0L
     private var actualScans = 0L
     private var coalescedRequests = 0L
@@ -52,7 +53,6 @@ internal object WifiScanCoordinator {
             }
         }
 
-        actualScans++
         val cacheAgeSeconds = cached?.let { ((now - it.completedAtElapsedMillis).coerceAtLeast(0L) + 999L) / 1000L } ?: 0L
         val previousAges = cached?.radios?.associate {
             it.bssid.lowercase() to (it.ageSeconds + cacheAgeSeconds)
@@ -66,6 +66,15 @@ internal object WifiScanCoordinator {
         if (result.succeeded) lastSuccessfulScan = result
         DiagnosticLogger.log("WIFI_SCAN", "coordinator=scan_attempt totalRequests=$totalRequests actualScans=$actualScans coalescedRequests=$coalescedRequests succeeded=${result.succeeded}")
         result to false
+    }
+
+    suspend fun awaitScanStart() {
+        val remaining = COALESCE_WINDOW_MS - (SystemClock.elapsedRealtime() - lastStartedElapsedMillis)
+        if (remaining > 0L) kotlinx.coroutines.delay(remaining)
+    }
+    fun recordScanStart() {
+        lastStartedElapsedMillis = SystemClock.elapsedRealtime()
+        actualScans++
     }
 
     private fun satisfiesRequest(

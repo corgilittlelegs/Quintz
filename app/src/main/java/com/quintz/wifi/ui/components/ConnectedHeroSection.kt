@@ -21,22 +21,32 @@ import com.quintz.wifi.model.AccessPointRadio
 import com.quintz.wifi.model.BandType
 import com.quintz.wifi.model.MacAddressPolicy
 import com.quintz.wifi.model.WifiStatus
+import com.quintz.wifi.model.SavedCredentialState
+import com.quintz.wifi.model.WifiOperationKind
 import com.quintz.wifi.ui.theme.*
 
 @Composable
 fun CliConnectedHeroPanel(
     status: WifiStatus,
     isOperating: Boolean,
+    currentOperation: WifiOperationKind = WifiOperationKind.IDLE,
     isPreparingPrefer: Boolean = false,
     recoveryThresholdRssi: Int,
     onToggleLock: () -> Unit,
     onOpenGraph: (() -> Unit)? = null,
     onGetMacPolicy: ((String) -> MacAddressPolicy?)? = null,
     onToggleMacPolicy: ((String) -> Unit)? = null,
+    onChangeMacPolicy: ((String) -> Unit)? = null,
     isWatchdogActive: Boolean = false,
     batteryOptimizationExempt: Boolean? = null,
-    onBatterySettings: (() -> Unit)? = null
+    onBatterySettings: (() -> Unit)? = null,
+    onManagePassword: (() -> Unit)? = null,
+    savedCredentialState: SavedCredentialState = SavedCredentialState.NOT_SAVED
 ) {
+    val isSteeringOp = currentOperation == WifiOperationKind.PREFER_5GHZ || currentOperation == WifiOperationKind.LOCK_BSSID
+    val isUnlockingOp = currentOperation == WifiOperationKind.UNLOCK_ROAM
+    val isMacPolicyOp = currentOperation == WifiOperationKind.CHANGE_MAC_POLICY
+
     val is5G = status.band == BandType.BAND_5_GHZ || status.band == BandType.BAND_6_GHZ
     val isLocked = status.isSteeredOrLocked
     val lockAccent = when {
@@ -75,9 +85,23 @@ fun CliConnectedHeroPanel(
                     backgroundColor = bandBg,
                     borderColor = bandColor.copy(alpha = 0.4f)
                 )
-            } else if (isOperating) {
+            } else if (isSteeringOp) {
                 CliBadge(
                     text = "STEERING...",
+                    accentColor = CliAccent5GHz,
+                    backgroundColor = CliAccent5GHzBg,
+                    borderColor = CliAccent5GHz.copy(alpha = 0.4f)
+                )
+            } else if (isMacPolicyOp) {
+                CliBadge(
+                    text = "MAC UPDATE...",
+                    accentColor = CliAccent24GHz,
+                    backgroundColor = CliAccent24GHzBg,
+                    borderColor = CliAccent24GHz.copy(alpha = 0.4f)
+                )
+            } else if (isOperating) {
+                CliBadge(
+                    text = "UPDATING...",
                     accentColor = CliAccent5GHz,
                     backgroundColor = CliAccent5GHzBg,
                     borderColor = CliAccent5GHz.copy(alpha = 0.4f)
@@ -91,7 +115,9 @@ fun CliConnectedHeroPanel(
         Text(
             text = if (status.isConnected && status.ssid.isNotEmpty()) status.ssid
                    else if (status.isConnected) "Wi-Fi Connected"
-                   else if (isOperating) "Negotiating Band..."
+                   else if (isSteeringOp) "Negotiating Band..."
+                   else if (isMacPolicyOp) "Reconnecting..."
+                   else if (isOperating) "Updating Profile..."
                    else "Not Connected",
             style = Typography.headlineMedium,
             color = CliTextPrimary
@@ -100,7 +126,9 @@ fun CliConnectedHeroPanel(
         Text(
             text = if (status.isConnected && status.ipAddress.isNotEmpty()) "IP: ${status.ipAddress}"
                    else if (status.isConnected) "Connected • Wi-Fi details unavailable"
-                   else if (isOperating) "Binding to target AP & verifying DHCP..."
+                   else if (isSteeringOp) "Binding to target AP & verifying DHCP..."
+                   else if (isMacPolicyOp) "Applying MAC policy..."
+                   else if (isOperating) "Applying profile updates..."
                    else "Connect to Wi-Fi",
             style = CliTypography.CodeMono,
             color = CliTextTertiary
@@ -118,7 +146,7 @@ fun CliConnectedHeroPanel(
             )
         }
 
-        if (isOperating || isPreparingPrefer) {
+        if (isSteeringOp || isPreparingPrefer || isUnlockingOp) {
             Spacer(modifier = Modifier.height(8.dp))
             LinearProgressIndicator(
                 modifier = Modifier
@@ -236,6 +264,8 @@ fun CliConnectedHeroPanel(
                         modifier = Modifier.weight(1f, fill = false)
                     ) {
                         val badgeText = when {
+                            !status.profileInspectionKnown && status.isSteeredOrLocked -> "REQUESTED MODE · PROFILE UNKNOWN"
+                            status.requestedPinnedBssid != null && !status.isLockedToBssid -> "PIN REQUESTED · TARGET NOT ACTIVE"
                             status.isLockedToBssid -> "LOCKED TO BSSID"
                             status.isPreferred5GHz -> "PREFERRED 5 GHz (ROAM ALLOWED)"
                             status.isPreferred5GHzFallback -> "PREFERRED 5 GHz (FALLBACK ACTIVE)"
@@ -297,7 +327,13 @@ fun CliConnectedHeroPanel(
                     )
                 }
 
+                status.requestedPinnedBssid?.takeIf { !it.equals(status.bssid, true) }?.let { pin ->
+                    Spacer(Modifier.height(4.dp))
+                    Text("Requested pin: $pin • current AP differs", style = CliTypography.CodeMono, color = CliAccent24GHz)
+                }
+
                 if (status.isConnected && status.ssid.isNotEmpty() && onGetMacPolicy != null) {
+                    val requestedPolicy = onGetMacPolicy(status.ssid)
                     Spacer(modifier = Modifier.height(8.dp))
                     CliDivider(color = CliBorderSubtle)
                     Spacer(modifier = Modifier.height(8.dp))
@@ -308,29 +344,77 @@ fun CliConnectedHeroPanel(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "MAC IDENTITY",
+                            text = "ANDROID MAC POLICY",
                             style = CliTypography.TelemetryLabel
                         )
 
-                        val currentPolicy = onGetMacPolicy(status.ssid) ?: MacAddressPolicy.DEVICE
+                        val currentPolicy = status.configuredMacPolicy
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(4.dp))
-                                .background(if (currentPolicy == MacAddressPolicy.DEVICE) CliAccent5GHzBg else CliSurface)
-                                .border(1.dp, if (currentPolicy == MacAddressPolicy.DEVICE) CliAccent5GHz.copy(alpha = 0.4f) else CliBorder, RoundedCornerShape(4.dp))
-                                .clickable { onToggleMacPolicy?.invoke(status.ssid) }
+                                .background(if (isMacPolicyOp) CliAccent24GHzBg else if (currentPolicy == MacAddressPolicy.DEVICE) CliAccent5GHzBg else CliSurface)
+                                .border(1.dp, if (isMacPolicyOp) CliAccent24GHz.copy(alpha = 0.5f) else if (currentPolicy == MacAddressPolicy.DEVICE) CliAccent5GHz.copy(alpha = 0.4f) else CliBorder, RoundedCornerShape(4.dp))
+                                .clickable(enabled = !isOperating && (onToggleMacPolicy != null || (status.profileInspectionKnown && onChangeMacPolicy != null))) {
+                                    onToggleMacPolicy?.invoke(status.ssid) ?: onChangeMacPolicy?.invoke(status.ssid)
+                                }
                                 .padding(horizontal = 8.dp, vertical = 3.dp)
                         ) {
                             Text(
-                                text = "${currentPolicy.displayName.uppercase()} ⇄",
+                                text = if (isMacPolicyOp) "UPDATING... ⇄"
+                                       else "${currentPolicy?.displayName?.uppercase() ?: "UNKNOWN"} ⇄",
                                 style = CliTypography.BadgeText,
-                                color = if (currentPolicy == MacAddressPolicy.DEVICE) CliAccent5GHz else CliTextSecondary
+                                color = if (isMacPolicyOp) CliAccent24GHz
+                                        else if (currentPolicy == MacAddressPolicy.DEVICE) CliAccent5GHz
+                                        else CliTextSecondary
                             )
                         }
                     }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text("Quintz preference: ${requestedPolicy?.displayName ?: "Not set"}", style = CliTypography.CodeMono, color = CliTextTertiary)
+                    Text("Observed MAC: ${status.observedMacAddress ?: "unavailable"}", style = CliTypography.CodeMono, color = CliTextTertiary)
+                    if (status.isMacPolicyPending) {
+                        Text("Applies on next connection", style = CliTypography.CodeMono, color = CliAccent24GHz)
+                    }
                 }
 
+                if (status.securityType in setOf("2", "4") && onManagePassword != null) {
+                    val canManagePassword = !isOperating && !status.isSteeredOrLocked
+                    Spacer(modifier = Modifier.height(8.dp))
+                    CliDivider(color = CliBorderSubtle)
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "PASSWORD SAVED IN QUINTZ",
+                            style = CliTypography.TelemetryLabel
+                        )
+
+                        CliBadge(
+                            text = if (savedCredentialState == SavedCredentialState.NOT_SAVED) "ADD PASSWORD ↗" else "MANAGE PASSWORD ↗",
+                            accentColor = if (canManagePassword) CliAccent5GHz else CliTextTertiary,
+                            backgroundColor = if (canManagePassword) CliAccent5GHzBg else CliSurface,
+                            borderColor = if (canManagePassword) CliAccent5GHz.copy(alpha = 0.5f) else CliBorder,
+                            modifier = Modifier.clickable(enabled = canManagePassword) { onManagePassword() }
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = if (status.isSteeredOrLocked) {
+                            "${savedCredentialState.displayName} · Unlock to auto-roam to manage credentials"
+                        } else {
+                            "${savedCredentialState.displayName} · Separate from Android's saved network"
+                        },
+                        style = CliTypography.CodeMono,
+                        color = CliTextTertiary
+                    )
+                }
                 // Keep the runtime watchdog state visible even after Auto-Roam stops it.
                 Spacer(modifier = Modifier.height(8.dp))
                 CliDivider(color = CliBorderSubtle)
@@ -400,11 +484,12 @@ fun CliConnectedHeroPanel(
             CliButton(
                 onClick = onToggleLock,
                 enabled = !isOperating && !isPreparingPrefer,
-                loading = isOperating || isPreparingPrefer,
+                loading = isSteeringOp || isUnlockingOp || isPreparingPrefer,
                 variant = if (isLocked) CliButtonVariant.Outlined else CliButtonVariant.Primary,
                 text = when {
-                    isOperating -> "SWITCHING BAND..."
                     isPreparingPrefer -> "FINDING 5 GHZ RADIO..."
+                    isSteeringOp -> "SWITCHING BAND..."
+                    isUnlockingOp -> "UNLOCKING TO ROAM..."
                     isLocked -> "UNLOCK TO AUTO-ROAM"
                     else -> "PREFER 5 GHz (ROAM ALLOWED)"
                 },

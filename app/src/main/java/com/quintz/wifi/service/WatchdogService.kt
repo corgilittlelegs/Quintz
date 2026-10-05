@@ -22,6 +22,7 @@ import com.quintz.wifi.R
 import com.quintz.wifi.core.DiagnosticLogger
 import com.quintz.wifi.core.WifiController
 import com.quintz.wifi.core.WifiSecurityPolicy
+import com.quintz.wifi.core.WatchdogEligibility
 import com.quintz.wifi.data.Preferences
 import com.quintz.wifi.data.WifiTargetMode
 import com.quintz.wifi.model.BandType
@@ -98,7 +99,22 @@ class WatchdogService : Service() {
         }
     }
 
+    private fun canRecoverDisconnected(): Boolean {
+        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+        if (!prefs.isWatchdogEnabled || !wm.isWifiEnabled || !ShizukuManager.isReady()) return false
+        val ssid = prefs.watchdogLastSsid?.takeIf { it.isNotEmpty() } ?: return false
+        return when (prefs.getWifiTargetMode(ssid)) {
+            WifiTargetMode.PIN_BSSID -> prefs.getPinnedBssid(ssid)?.let { pin ->
+                val security = prefs.getTrustedRadioSecurity(ssid, pin)
+                security != null && (security in setOf("0", "6") || !prefs.getPassword(ssid).isNullOrEmpty())
+            } == true
+            WifiTargetMode.PREFER_5_GHZ -> prefs.getTrustedSecurity(ssid) != null && !prefs.getPassword(ssid).isNullOrEmpty()
+            else -> false
+        }
+    }
+
     private suspend fun handlePotentialDisconnect(source: String) {
+        if (!canRecoverDisconnected()) return
         if (!isHandlingDisconnect.compareAndSet(false, true)) {
             DiagnosticLogger.log("WATCHDOG", "Disconnect handling already active; dropping redundant request from $source.")
             return
@@ -117,6 +133,7 @@ class WatchdogService : Service() {
                 // 4-second app fallback can race that work and start a competing connect.
                 // Wait through a 20-second recovery window before issuing an app reconnect.
                 for (observation in 0 until 20) {
+                    if (!canRecoverDisconnected()) return@withLock
                     val status = controller.refreshStatus()
                     if (status.isConnected) {
                         if (status.ssid.isNotEmpty()) {
@@ -135,6 +152,7 @@ class WatchdogService : Service() {
 
                 // Still disconnected across 20 observations over 19 seconds; Android had time
                 // to complete its normal reconnect retries before the app intervenes.
+                if (!canRecoverDisconnected()) return@withLock
                 val targetSsid = prefs.watchdogLastSsid.orEmpty()
                 DiagnosticLogger.log("WATCHDOG", "Confirmed disconnect across 20 observations over 19s ($source) for target '$targetSsid'.")
                 prefs.isWatchdogFallbackActive = true
@@ -278,7 +296,12 @@ class WatchdogService : Service() {
                 }
                 // Stable connections need a periodic safety check; network changes wake this loop.
                 var loopDelay = 30000L
+                if (!prefs.hasWatchdogTargets()) {
+                    WatchdogControl.stop(this@WatchdogService, prefs); break
+                }
                 if (prefs.isWatchdogEnabled) {
+                    val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+                    if (!wm.isWifiEnabled) { candidateObservations.clear(); delay(30_000L); continue }
                     if (!ShizukuManager.isReady()) {
                         DiagnosticLogger.log("WATCHDOG", "5 GHz recovery skipped reason=shizuku_not_ready")
                         updateNotification("Waiting for Shizuku permission...")
@@ -351,28 +374,16 @@ class WatchdogService : Service() {
                                         val currentFlags = radios.firstOrNull {
                                             it.bssid.equals(status.bssid, ignoreCase = true) && it.ssid == status.ssid
                                         }?.flags.orEmpty()
-                                        val eligibleRadios = sameNetworkRadios.filter {
-                                            it.rssi >= threshold && it.ageSeconds <= 8L &&
-                                                WifiSecurityPolicy.allowsTrustedAutomaticSwitch(
-                                                    status.securityType, currentFlags, it.flags,
-                                                    prefs.getTrustedRadioSecurity(status.ssid, it.bssid)
-                                                )
-                                        }
+                                        fun rejection(radio: com.quintz.wifi.model.AccessPointRadio) = WatchdogEligibility.rejection(
+                                            status, radio, targetMode, pinnedBssid, prefs.getTrustedRadioSecurity(status.ssid, radio.bssid),
+                                            threshold, android.os.SystemClock.elapsedRealtime())
+                                        val eligibleRadios = sameNetworkRadios.filter { rejection(it) == null }
                                         val eligibleBssids = eligibleRadios.map { it.bssid.lowercase() }.toSet()
                                         val lostBssids = candidateObservations.keys.filter { it !in eligibleBssids }
                                         lostBssids.forEach { candidateObservations.remove(it) }
 
                                         sameNetworkRadios.forEach { radio ->
-                                            val rejectionReason = when {
-                                                radio.rssi < threshold -> "below_rssi_threshold"
-                                                radio.ageSeconds > 8L -> "scan_result_stale"
-                                                !WifiSecurityPolicy.allowsAutomaticSwitch(status.securityType, currentFlags, radio.flags) -> "security_mismatch_or_unknown"
-                                                !WifiSecurityPolicy.allowsTrustedAutomaticSwitch(
-                                                    status.securityType, currentFlags, radio.flags,
-                                                    prefs.getTrustedRadioSecurity(status.ssid, radio.bssid)
-                                                ) -> "radio_not_trusted"
-                                                else -> null
-                                            }
+                                            val rejectionReason = rejection(radio)
                                             if (rejectionReason != null) {
                                                 DiagnosticLogger.log(
                                                     "WATCHDOG",
@@ -406,7 +417,7 @@ class WatchdogService : Service() {
                                             .maxByOrNull { it.rssi }
 
                                         if (verified5G != null) {
-                                            if (savedPassword.isNullOrEmpty()) {
+                                            if (savedPassword.isNullOrEmpty() && status.securityType !in setOf("0", "6")) {
                                                 DiagnosticLogger.log(
                                                     "WATCHDOG",
                                                     "5 GHz recovery deferred reason=saved_password_missing ssid='${status.ssid}' bssid=${verified5G.bssid} rssi=${verified5G.rssi}dBm"

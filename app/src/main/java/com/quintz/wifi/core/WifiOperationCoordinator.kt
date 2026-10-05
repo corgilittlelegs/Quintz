@@ -1,5 +1,6 @@
 package com.quintz.wifi.core
 
+import com.quintz.wifi.model.WifiOperationKind
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -11,15 +12,19 @@ internal object WifiOperationCoordinator {
     private val stateGuard = Any()
     private val _isOperating = MutableStateFlow(false)
     val isOperating: StateFlow<Boolean> = _isOperating.asStateFlow()
+    private val _currentOperation = MutableStateFlow(WifiOperationKind.IDLE)
+    val currentOperation: StateFlow<WifiOperationKind> = _currentOperation.asStateFlow()
 
-    fun tryBegin(): Boolean = synchronized(stateGuard) {
+    fun tryBegin(kind: WifiOperationKind = WifiOperationKind.PREFER_5GHZ): Boolean = synchronized(stateGuard) {
         if (!profileChange.tryLock()) return@synchronized false
+        _currentOperation.value = kind
         _isOperating.value = true
         true
     }
 
     fun end() = synchronized(stateGuard) {
         profileChange.unlock()
+        _currentOperation.value = WifiOperationKind.IDLE
         _isOperating.value = false
     }
 }

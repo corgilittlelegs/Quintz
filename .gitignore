@@ -15,6 +15,11 @@ bin/
 gen/
 out/
 **/build/
+/release_assets/
+/release-notes.md
+
+# Local audit reports and evidence
+/docs/audits/
 
 # Gradle files
 .gradle/
@@ -55,10 +60,8 @@ captures/
 ndkBuild/
 
 # Signing keys & secrets
+/keystore/
 *.jks
-keystore/*.bin
-keystore/*password*.txt
-keystore/github-actions-secrets.env
 *.keystore
 *.pem
 *.key

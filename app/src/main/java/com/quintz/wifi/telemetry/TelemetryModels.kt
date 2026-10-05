@@ -36,6 +36,7 @@ data class CandidateMeta(
     val band: BandType,
     val latestRssi: Int,
     val colorIndex: Int,
+    val eligibilityReason: String? = null,
     val isInLatestScan: Boolean = false,
     val observedAtMillis: Long = 0L
 )

@@ -59,6 +59,7 @@ import com.quintz.wifi.core.WifiSecurityPolicy
 import com.quintz.wifi.model.AccessPointRadio
 import com.quintz.wifi.model.BandType
 import com.quintz.wifi.model.MacAddressPolicy
+import com.quintz.wifi.model.SavedCredentialState
 import com.quintz.wifi.model.ShizukuState
 import com.quintz.wifi.model.WifiStatus
 import com.quintz.wifi.shizuku.ShizukuManager
@@ -84,6 +85,10 @@ enum class PhoneTab {
     GRAPH
 }
 
+private enum class WifiRequestKind { BIND, PREFER }
+private data class PendingWifiRequest(val kind: WifiRequestKind, val ssid: String,
+    val radio: AccessPointRadio?, val password: String, val source: String, val correlationId: String)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
@@ -92,10 +97,17 @@ fun MainScreen(
     onToggleTheme: () -> Unit = { viewModel.toggleTheme(isDarkTheme) }
 ) {
     val context = LocalContext.current
+    val settings = com.quintz.wifi.data.Preferences.get(context)
+    var migrationConflicts by remember { mutableStateOf(settings.migrationConflicts) }
+    var showCredentialDialog by remember { mutableStateOf(false) }
+    var replacementPassword by remember { mutableStateOf("") }
+
     val shizukuState by viewModel.shizukuState.collectAsState()
     val wifiStatus by viewModel.wifiStatus.collectAsState()
+    val savedCredentialState by viewModel.savedCredentialState.collectAsState()
     val radios by viewModel.radios.collectAsState()
     val isOperating by viewModel.isOperating.collectAsState()
+    val currentOperation by viewModel.currentOperation.collectAsState()
     val isScanning by viewModel.isScanning.collectAsState()
     val isScanQueued by viewModel.isScanQueued.collectAsState()
     val watchdogActive by viewModel.watchdogActive.collectAsState()
@@ -108,7 +120,7 @@ fun MainScreen(
     var isExportingDiagnostics by remember { mutableStateOf(false) }
     var showMacPolicyDialog by remember { mutableStateOf(false) }
     var targetSsidForMacPolicy by remember { mutableStateOf("") }
-    var pendingLockAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var pendingLockAction by remember { mutableStateOf<PendingWifiRequest?>(null) }
     var passwordInput by remember { mutableStateOf("") }
     var isPasswordVisible by remember { mutableStateOf(false) }
     var targetRadioForPassword by remember { mutableStateOf<AccessPointRadio?>(null) }
@@ -145,6 +157,13 @@ fun MainScreen(
         pendingBindSource = source
     }
 
+    fun openMacPolicySelection(ssid: String) {
+        if (isOperating) return
+        targetSsidForMacPolicy = ssid
+        pendingLockAction = null
+        showMacPolicyDialog = true
+    }
+
     fun requestPrefer5Ghz(source: String) {
         if (isPreparingPrefer) return
         isPreparingPrefer = true
@@ -163,14 +182,26 @@ fun MainScreen(
         }
     }
 
-    fun executeWithMacPolicyCheck(ssid: String, action: () -> Unit) {
-        if (ssid.isEmpty() || viewModel.getMacPolicy(ssid) != null) {
-            action()
-        } else {
-            targetSsidForMacPolicy = ssid
-            pendingLockAction = action
+    fun dispatchRequest(request: PendingWifiRequest, policy: com.quintz.wifi.model.MacAddressPolicy?) {
+        when (request.kind) {
+            WifiRequestKind.BIND -> request.radio?.let { viewModel.lockToSpecificRadio(it, request.password, macPolicy = policy,
+                requestSource = request.source, correlationId = request.correlationId) }
+            WifiRequestKind.PREFER -> viewModel.forceLock5Ghz(request.password, macPolicy = policy, approvedBssid = request.radio?.bssid,
+                requestSource = request.source, correlationId = request.correlationId)
+        }
+    }
+    fun executeWithMacPolicyCheck(request: PendingWifiRequest) {
+        val policy = viewModel.getMacPolicy(request.ssid)
+        if (policy != null) dispatchRequest(request, policy)
+        else {
+            targetSsidForMacPolicy = request.ssid
+            pendingLockAction = request
             showMacPolicyDialog = true
         }
+    }
+    fun clearPasswordPrompt() {
+        showPasswordDialog = false; passwordInput = ""; isPasswordVisible = false
+        targetRadioForPassword = null; preferRadioForPassword = null
     }
 
     fun confirmRadioBind() {
@@ -188,18 +219,14 @@ fun MainScreen(
         val correlationId = DiagnosticLogger.newCorrelationId()
         DiagnosticLogger.log("USER_ACTION", "id=$correlationId source=$source action=bind targetSsid='$targetSsid' targetBssid=${radio.bssid} security=${WifiSecurityPolicy.securityLabel(radio.flags)}")
         if (advertised.isOpen || advertised.isOwe) {
-            executeWithMacPolicyCheck(targetSsid) {
-                viewModel.lockToSpecificRadio(radio, "", requestSource = source, correlationId = correlationId)
-            }
+            executeWithMacPolicyCheck(PendingWifiRequest(WifiRequestKind.BIND, targetSsid, radio, "", source, correlationId))
         } else {
             val saved = viewModel.getSavedPassword(targetSsid)
             if (saved.isNotEmpty()) {
-                executeWithMacPolicyCheck(targetSsid) {
-                    viewModel.lockToSpecificRadio(radio, saved, requestSource = source, correlationId = correlationId)
-                }
+                executeWithMacPolicyCheck(PendingWifiRequest(WifiRequestKind.BIND, targetSsid, radio, saved, source, correlationId))
             } else {
                 targetRadioForPassword = radio
-                passwordInput = ""
+                passwordInput = ""; isPasswordVisible = false
                 showPasswordDialog = true
             }
         }
@@ -213,14 +240,11 @@ fun MainScreen(
         val saved = viewModel.getSavedPassword(ssid)
         if (saved.isNotEmpty()) {
             val correlationId = DiagnosticLogger.newCorrelationId()
-            executeWithMacPolicyCheck(ssid) {
-                viewModel.forceLock5Ghz(saved, approvedBssid = radio.bssid,
-                    requestSource = source, correlationId = correlationId)
-            }
+            executeWithMacPolicyCheck(PendingWifiRequest(WifiRequestKind.PREFER, ssid, radio, saved, source, correlationId))
         } else {
             preferRadioForPassword = radio
             targetRadioForPassword = null
-            passwordInput = ""
+            passwordInput = ""; isPasswordVisible = false
             showPasswordDialog = true
         }
     }
@@ -453,6 +477,7 @@ fun MainScreen(
                         CliConnectedHeroPanel(
                             status = wifiStatus,
                             isOperating = isOperating,
+                            currentOperation = currentOperation,
                             isPreparingPrefer = isPreparingPrefer,
                             recoveryThresholdRssi = viewModel.prefs.recoveryThresholdRssi,
                             onGetMacPolicy = { viewModel.getMacPolicy(it) },
@@ -473,7 +498,9 @@ fun MainScreen(
                             onOpenGraph = { selectedRightPane = RightPaneView.GRAPH },
                             isWatchdogActive = watchdogActive,
                             batteryOptimizationExempt = batteryOptimizationExempt,
-                            onBatterySettings = { viewModel.showBatteryOptimizationExplanation() }
+                            onManagePassword = { replacementPassword = ""; showCredentialDialog = true },
+                            savedCredentialState = savedCredentialState,
+                onBatterySettings = { viewModel.showBatteryOptimizationExplanation() }
                         )
 
                         CliQuickTilePanel(
@@ -610,39 +637,10 @@ fun MainScreen(
                                             }
                                         }
                                     } else {
-                                        Column(
-                                            modifier = Modifier
-                                                .fillMaxSize()
-                                                .verticalScroll(rememberScrollState())
-                                        ) {
-                                            CliPanel(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                containerColor = CliSurface,
-                                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
-                                            ) {
-                                                Column(modifier = Modifier.fillMaxWidth()) {
-                                                    filteredRadios.forEachIndexed { index, radio ->
-                                                        if (index > 0) {
-                                                            CliDivider(color = CliBorderSubtle)
-                                                        }
-                                                        val isCurrent = wifiStatus.isConnected && radio.bssid.equals(wifiStatus.bssid, ignoreCase = true)
-                                                        CliRadioRow(
-                                                            radio = radio,
-                                                            isCurrent = isCurrent,
-                                                            isPinned = wifiStatus.isLockedToBssid && wifiStatus.lockedBssid?.equals(radio.bssid, ignoreCase = true) == true,
-                                                            onLockClick = {
-                                                                requestRadioBind(radio, "main_screen_wide_radio_lock")
-                                                            },
-                                                            onUnpinClick = { viewModel.unlockToAuto("main_screen_wide_radio_unpin") },
-
-                                                            isOperating = isOperating,
-                                                            asCard = false
-                                                        )
-                                                    }
-                                                }
-                                            }
-                                            Spacer(modifier = Modifier.height(16.dp))
-                                        }
+                                        ScannerRadioList(filteredRadios, wifiStatus, isOperating,
+                                            shizukuState.isPermissionGranted, Modifier.fillMaxSize(),
+                                            onBind = { requestRadioBind(it, "main_screen_wide_radio_lock") },
+                                            onUnpin = { viewModel.unlockToAuto("main_screen_wide_radio_unpin") })
                                     }
                                 }
 
@@ -743,6 +741,7 @@ fun MainScreen(
                                     CliConnectedHeroPanel(
                                         status = wifiStatus,
                                         isOperating = isOperating,
+                                        currentOperation = currentOperation,
                                         isPreparingPrefer = isPreparingPrefer,
                                         recoveryThresholdRssi = viewModel.prefs.recoveryThresholdRssi,
                                         onGetMacPolicy = { viewModel.getMacPolicy(it) },
@@ -763,7 +762,9 @@ fun MainScreen(
                                         onOpenGraph = { selectedPhoneTab = PhoneTab.GRAPH },
                                         isWatchdogActive = watchdogActive,
                                         batteryOptimizationExempt = batteryOptimizationExempt,
-                                        onBatterySettings = { viewModel.showBatteryOptimizationExplanation() }
+                                        onManagePassword = { replacementPassword = ""; showCredentialDialog = true },
+                                        savedCredentialState = savedCredentialState,
+                onBatterySettings = { viewModel.showBatteryOptimizationExplanation() }
                                     )
 
                                     CliQuickTilePanel(
@@ -787,7 +788,6 @@ fun MainScreen(
                                 Column(
                                     modifier = Modifier
                                         .fillMaxSize()
-                                        .verticalScroll(rememberScrollState())
                                 ) {
                                     CliPanel(
                                         modifier = Modifier.fillMaxWidth(),
@@ -854,31 +854,13 @@ fun MainScreen(
                                                     color = CliTextTertiary
                                                 )
                                             }
-                                        } else {
-                                            Column(modifier = Modifier.fillMaxWidth()) {
-                                                filteredRadios.forEachIndexed { index, radio ->
-                                                    if (index > 0) {
-                                                        CliDivider(color = CliBorderSubtle)
-                                                    }
-                                                    val isCurrent = wifiStatus.isConnected && radio.bssid.equals(wifiStatus.bssid, ignoreCase = true)
-                                                    CliRadioRow(
-                                                        radio = radio,
-                                                        isCurrent = isCurrent,
-                                                        isPinned = wifiStatus.isLockedToBssid && wifiStatus.lockedBssid?.equals(radio.bssid, ignoreCase = true) == true,
-                                                        onLockClick = {
-                                                            requestRadioBind(radio, "main_screen_controls_radio_lock")
-                                                        },
-                                                        onUnpinClick = { viewModel.unlockToAuto("main_screen_controls_radio_unpin") },
-
-                                                        isOperating = isOperating,
-                                                        asCard = false
-                                                    )
-                                                }
-                                            }
                                         }
                                     }
 
-                                    Spacer(modifier = Modifier.height(16.dp))
+                                    ScannerRadioList(filteredRadios, wifiStatus, isOperating,
+                                        shizukuState.isPermissionGranted, Modifier.weight(1f),
+                                        onBind = { requestRadioBind(it, "main_screen_scanner_radio_lock") },
+                                        onUnpin = { viewModel.unlockToAuto("main_screen_scanner_radio_unpin") })
                                 }
                             }
 
@@ -943,6 +925,8 @@ fun MainScreen(
     }
 
     pendingBindRadio?.let { radio ->
+        val isCurrentAp = wifiStatus.isConnected && radio.bssid.equals(wifiStatus.bssid, ignoreCase = true)
+        val actionVerb = if (isCurrentAp) "PIN" else "BIND"
         Dialog(
             onDismissRequest = { pendingBindRadio = null },
             properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -968,18 +952,25 @@ fun MainScreen(
                         .fillMaxWidth()
                         .clickable(enabled = false) {}
                 ) {
-                    Text("CONFIRM BSSID BIND", style = CliTypography.TelemetryLabel, color = CliAccent5GHz)
+                    Text("CONFIRM BSSID $actionVerb", style = CliTypography.TelemetryLabel, color = CliAccent5GHz)
                     Spacer(modifier = Modifier.height(12.dp))
                     Text("SSID: ${radio.ssid.ifEmpty { wifiStatus.ssid }}", style = CliTypography.CodeMono, color = CliTextPrimary)
                     Text("BSSID: ${radio.bssid}", style = CliTypography.CodeMono, color = CliTextPrimary)
                     Text("Security: ${WifiSecurityPolicy.securityLabel(radio.flags)}", style = CliTypography.CodeMono, color = CliTextPrimary)
                     Spacer(modifier = Modifier.height(10.dp))
-                    Text("Updates the saved network profile and may interrupt the current connection.", style = Typography.bodyMedium, color = CliTextSecondary)
+                    Text(
+                        text = if (isCurrentAp)
+                            "Locks your current connection to this access point so Android will not roam away."
+                        else
+                            "Switches to this access point and locks to it. Updates the saved network profile and may interrupt the current connection.",
+                        style = Typography.bodyMedium,
+                        color = CliTextSecondary
+                    )
                     Spacer(modifier = Modifier.height(16.dp))
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         CliButton(text = "CANCEL", variant = CliButtonVariant.Ghost,
                             onClick = { pendingBindRadio = null }, modifier = Modifier.weight(1f))
-                        CliButton(text = "BIND", variant = CliButtonVariant.Primary,
+                        CliButton(text = actionVerb, variant = CliButtonVariant.Primary,
                             onClick = { confirmRadioBind() }, modifier = Modifier.weight(1f))
                     }
                 }
@@ -988,9 +979,175 @@ fun MainScreen(
     }
 
     // Industrial Passphrase Prompt Dialog
+    if (migrationConflicts.isNotEmpty()) {
+        AlertDialog(onDismissRequest = {}, title = { Text("Choose your saved settings") },
+            text = { Text("Older stores contain different values for: ${migrationConflicts.joinToString()}. Watchdog stays off until you choose which settings to keep.") },
+            confirmButton = { TextButton(onClick = { if (settings.resolveMigrationConflicts(true)) migrationConflicts = emptyList() }) { Text("Keep fallback settings") } },
+            dismissButton = { TextButton(onClick = { if (settings.resolveMigrationConflicts(false)) migrationConflicts = emptyList() }) { Text("Keep encrypted-store settings") } })
+    }
+    if (showCredentialDialog) {
+        var isReplacementVisible by remember { mutableStateOf(false) }
+        fun closeCredentials() {
+            replacementPassword = ""
+            isReplacementVisible = false
+            showCredentialDialog = false
+        }
+
+        fun submitReplacement() {
+            if (replacementPassword.isNotBlank() && !isOperating && !wifiStatus.isSteeredOrLocked) {
+                val pass = replacementPassword
+                closeCredentials()
+                viewModel.replacePassword(pass)
+            }
+        }
+
+        Dialog(
+            onDismissRequest = { closeCredentials() },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.72f))
+                    .imePadding()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { closeCredentials() },
+                contentAlignment = Alignment.Center
+            ) {
+                CliPanel(
+                    borderColor = CliBorderActive,
+                    containerColor = CliSurface,
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(20.dp),
+                    modifier = Modifier
+                        .padding(horizontal = 24.dp)
+                        .widthIn(max = 420.dp)
+                        .fillMaxWidth()
+                        .clickable(enabled = false) {}
+                ) {
+                    Text(
+                        text = "NETWORK CREDENTIALS",
+                        style = CliTypography.TelemetryLabel,
+                        color = CliAccent5GHz
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("SSID: ${wifiStatus.ssid.ifEmpty { "(Unknown Network)" }}", style = CliTypography.CodeMono, color = CliTextPrimary)
+                    if (wifiStatus.bssid.isNotEmpty()) {
+                        Text("BSSID: ${wifiStatus.bssid}", style = CliTypography.CodeMono, color = CliTextPrimary)
+                    }
+                    val secLabel = when (wifiStatus.securityType) {
+                        "4", "sae" -> "WPA3 Personal"
+                        "2", "psk" -> "WPA2 Personal"
+                        else -> "WPA2/WPA3 Personal"
+                    }
+                    Text("Security: $secLabel", style = CliTypography.CodeMono, color = CliTextPrimary)
+                    Text("Password saved in Quintz: ${savedCredentialState.displayName}", style = CliTypography.CodeMono, color = CliTextSecondary)
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = if (wifiStatus.isSteeredOrLocked)
+                            "Credentials cannot be modified while 5 GHz steering or BSSID pinning is active. Unlock to auto-roam first."
+                        else
+                            "Quintz stores an encrypted password copy locally on-device for automatic 5 GHz band steering and BSSID pinning.",
+                        style = Typography.bodyMedium,
+                        color = if (wifiStatus.isSteeredOrLocked) CliAccent24GHz else CliTextSecondary
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    OutlinedTextField(
+                        value = replacementPassword,
+                        onValueChange = { replacementPassword = it },
+                        enabled = !isOperating && !wifiStatus.isSteeredOrLocked,
+                        placeholder = {
+                            Text("Enter passphrase :_", style = CliTypography.CodeMono, color = CliTextTertiary)
+                        },
+                        visualTransformation = if (isReplacementVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(
+                                onClick = { isReplacementVisible = !isReplacementVisible },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (isReplacementVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = if (isReplacementVisible) "Hide passphrase" else "Show passphrase",
+                                    tint = if (isReplacementVisible) CliAccent5GHz else CliTextTertiary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Password,
+                            imeAction = ImeAction.Done
+                        ),
+                        keyboardActions = KeyboardActions(
+                            onDone = { submitReplacement() }
+                        ),
+                        textStyle = CliTypography.CodeMono.copy(color = CliTextPrimary),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = CliTextPrimary,
+                            unfocusedTextColor = CliTextPrimary,
+                            focusedContainerColor = CliSurfaceElevated,
+                            unfocusedContainerColor = CliSurfaceElevated,
+                            focusedBorderColor = CliAccent5GHz,
+                            unfocusedBorderColor = CliBorder
+                        ),
+                        shape = RoundedCornerShape(6.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    if (savedCredentialState == SavedCredentialState.SAVED && !wifiStatus.isSteeredOrLocked) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Forget password in Quintz only",
+                            style = CliTypography.CodeMono,
+                            color = CliAccentRed,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .clickable(enabled = !isOperating) {
+                                    viewModel.forgetPassword(wifiStatus.ssid)
+                                    closeCredentials()
+                                }
+                                .padding(vertical = 4.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        CliButton(
+                            text = "CANCEL",
+                            variant = CliButtonVariant.Ghost,
+                            onClick = { closeCredentials() },
+                            modifier = Modifier.weight(1f)
+                        )
+                        CliButton(
+                            text = "SAVE PASSWORD",
+                            variant = CliButtonVariant.Primary,
+                            enabled = !isOperating && !wifiStatus.isSteeredOrLocked && replacementPassword.isNotBlank(),
+                            onClick = { submitReplacement() },
+                            modifier = Modifier.weight(1.5f)
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     if (showPasswordDialog) {
         val isPreferFlow = preferRadioForPassword != null
-        val promptTitle = if (isPreferFlow) "AUTHENTICATE 5 GHz PREFERENCE" else "AUTHENTICATE BSSID BIND"
+        val isCurrentTarget = !isPreferFlow && targetRadioForPassword?.let {
+            wifiStatus.isConnected && it.bssid.equals(wifiStatus.bssid, ignoreCase = true)
+        } == true
+        val promptTitle = when {
+            isPreferFlow -> "AUTHENTICATE 5 GHz PREFERENCE"
+            isCurrentTarget -> "AUTHENTICATE BSSID PIN"
+            else -> "AUTHENTICATE BSSID BIND"
+        }
         val isTargetOpen = targetRadioForPassword?.let {
             val advertised = WifiSecurityPolicy.fromFlags(it.flags)
             advertised.isOpen || advertised.isOwe
@@ -1002,10 +1159,16 @@ fun MainScreen(
             "This network is Open / Unsecured. No passphrase required."
         } else if (isPreferFlow) {
             "Android requires credentials to prioritize 5 GHz bands while allowing roaming. Stored securely on-device."
+        } else if (isCurrentTarget) {
+            "Android requires credentials to lock your current access point. Stored securely on-device."
         } else {
             "Android requires credentials to enforce specific BSSID binding. Stored securely on-device."
         }
-        val promptButtonText = if (isPreferFlow) "PREFER 5 GHZ" else "BIND & LOCK"
+        val promptButtonText = when {
+            isPreferFlow -> "PREFER 5 GHZ"
+            isCurrentTarget -> "PIN & LOCK"
+            else -> "BIND & LOCK"
+        }
 
         fun submitPassphrase() {
             if (isTargetOpen || passwordInput.isNotBlank()) {
@@ -1022,24 +1185,15 @@ fun MainScreen(
                     "USER_ACTION",
                     "id=$correlationId source=$source callback=${if (preferTarget != null) "prefer_5ghz" else "bind_and_lock"} targetSsid='$targetSsid' targetBssid=${(preferTarget ?: target)?.bssid ?: "auto_5ghz"} connected=${wifiStatus.isConnected} currentBssid=${wifiStatus.bssid} band=${wifiStatus.band.displayName} rssi=${wifiStatus.rssi}"
                 )
-                executeWithMacPolicyCheck(targetSsid) {
-                    if (preferTarget != null) {
-                        viewModel.forceLock5Ghz(pass, approvedBssid = preferTarget.bssid,
-                            requestSource = source, correlationId = correlationId)
-                    } else if (target != null) {
-                        viewModel.lockToSpecificRadio(target, pass, requestSource = source, correlationId = correlationId)
-                    } else {
-                        viewModel.forceLock5Ghz(pass, requestSource = source, correlationId = correlationId)
-                    }
-                }
+                clearPasswordPrompt()
+                executeWithMacPolicyCheck(PendingWifiRequest(if (preferTarget != null || target == null) WifiRequestKind.PREFER else WifiRequestKind.BIND,
+                    targetSsid, preferTarget ?: target, pass, source, correlationId))
             }
         }
 
         Dialog(
             onDismissRequest = {
-                showPasswordDialog = false
-                isPasswordVisible = false
-                preferRadioForPassword = null
+                clearPasswordPrompt()
             },
             properties = DialogProperties(usePlatformDefaultWidth = false)
         ) {
@@ -1052,9 +1206,7 @@ fun MainScreen(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null
                     ) {
-                        showPasswordDialog = false
-                        isPasswordVisible = false
-                        preferRadioForPassword = null
+                        clearPasswordPrompt()
                     },
                 contentAlignment = Alignment.Center
             ) {
@@ -1144,8 +1296,7 @@ fun MainScreen(
                             text = "CANCEL",
                             variant = CliButtonVariant.Ghost,
                             onClick = {
-                                showPasswordDialog = false
-                                preferRadioForPassword = null
+                                clearPasswordPrompt()
                             },
                             modifier = Modifier.weight(1f)
                         )
@@ -1164,15 +1315,19 @@ fun MainScreen(
     if (showMacPolicyDialog) {
         MacPolicyDialog(
             targetSsid = targetSsidForMacPolicy,
+            currentPolicy = wifiStatus.configuredMacPolicy.takeIf { wifiStatus.ssid == targetSsidForMacPolicy },
+            selectionDescription = if (pendingLockAction != null) null
+                else if (wifiStatus.isSteeredOrLocked) "Applies the selected MAC policy and reconnects this network. Its steering mode and saved pin are kept."
+                else "Saves the MAC policy in Android for the next connection. Quintz will not request a reconnect or start the watchdog.",
             onSelect = { policy ->
-                viewModel.setMacPolicy(targetSsidForMacPolicy, policy)
-                showMacPolicyDialog = false
-                pendingLockAction?.invoke()
-                pendingLockAction = null
+                val request = pendingLockAction
+                val ssid = targetSsidForMacPolicy
+                showMacPolicyDialog = false; pendingLockAction = null; targetSsidForMacPolicy = ""
+                if (request != null) dispatchRequest(request, policy) else viewModel.setMacPolicy(ssid, policy)
             },
             onCancel = {
                 showMacPolicyDialog = false
-                pendingLockAction = null
+                pendingLockAction = null; targetSsidForMacPolicy = ""; clearPasswordPrompt()
             }
         )
     }
@@ -1383,4 +1538,25 @@ private fun GraphPane(
         onSelectCandidate = { viewModel.selectCandidateBssid(it) },
         isConnected = if (telemetryState.isPaused) telemetryState.isConnected else isConnected
     )
+}
+
+@Composable
+private fun ScannerRadioList(radios: List<AccessPointRadio>, status: WifiStatus, operating: Boolean,
+    access: Boolean, modifier: Modifier, onBind: (AccessPointRadio) -> Unit, onUnpin: () -> Unit) {
+    var nowElapsed by remember { mutableLongStateOf(android.os.SystemClock.elapsedRealtime()) }
+    LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(1000L); nowElapsed = android.os.SystemClock.elapsedRealtime() } }
+    androidx.compose.foundation.lazy.LazyColumn(modifier = modifier, contentPadding = PaddingValues(vertical = 8.dp)) {
+        items(radios.size, key = { radios[it].bssid.lowercase() }) { index ->
+            val original = radios[index]
+            val ageMs = if (original.observedAtElapsedMillis > 0) nowElapsed - original.observedAtElapsedMillis else Long.MAX_VALUE
+            val age = if (ageMs >= 0 && ageMs < Long.MAX_VALUE - 999) (ageMs + 999) / 1000 else Long.MAX_VALUE
+            val radio = original.copy(ageSeconds = age)
+            if (index > 0) CliDivider(color = CliBorderSubtle)
+            CliRadioRow(radio = radio, isCurrent = status.isConnected && radio.bssid.equals(status.bssid, true),
+                isPinned = status.ssid == radio.ssid && status.requestedPinnedBssid?.equals(radio.bssid, true) == true,
+                onLockClick = { onBind(radio) }, onUnpinClick = onUnpin, isOperating = operating,
+                canBind = access && ageMs in 0L..8000L,
+                canUnpin = access && status.profileInspectionKnown, asCard = false)
+        }
+    }
 }

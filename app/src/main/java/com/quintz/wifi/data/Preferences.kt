@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.quintz.wifi.model.MacAddressPolicy
+import com.quintz.wifi.model.SavedCredentialState
 
 enum class WifiTargetMode { AUTO, PREFER_5_GHZ, PIN_BSSID }
 
@@ -19,6 +20,7 @@ class Preferences private constructor(context: Context) {
     }
 
     private val fallbackPrefs = context.getSharedPreferences("prefs", Context.MODE_PRIVATE)
+    private var settingsAvailable = true
     private var legacyPasswordCleanupSucceeded = true
     private val securePrefs: SharedPreferences? = try {
         val masterKey = MasterKey.Builder(context)
@@ -36,46 +38,32 @@ class Preferences private constructor(context: Context) {
         null
     }
     // Non-secret settings remain usable if Android Keystore is unavailable. Passwords do not.
-    private val prefs: SharedPreferences = securePrefs ?: fallbackPrefs
+    private val prefs: SharedPreferences = context.getSharedPreferences("settings_v2", Context.MODE_PRIVATE)
 
     init {
-        // Older versions used ordinary preferences when Keystore failed. Move every supported
-        // setting, including passwords, so restoring Keystore does not lose the user's choices.
-        securePrefs?.let { secure ->
-            runCatching {
-                val legacyValues = fallbackPrefs.all
-                if (legacyValues.isNotEmpty()) {
-                    val secureEdit = secure.edit()
-                    val migratedKeys = mutableListOf<String>()
-                    legacyValues.forEach { (key, value) ->
-                        if (secure.contains(key)) {
-                            migratedKeys += key
-                        } else {
-                            when (value) {
-                                is String -> secureEdit.putString(key, value)
-                                is Boolean -> secureEdit.putBoolean(key, value)
-                                is Int -> secureEdit.putInt(key, value)
-                                is Long -> secureEdit.putLong(key, value)
-                                is Float -> secureEdit.putFloat(key, value)
-                                is Set<*> -> {
-                                    val strings = value.filterIsInstance<String>()
-                                    if (strings.size == value.size) {
-                                        secureEdit.putStringSet(key, strings.toSet())
-                                    } else return@forEach
-                                }
-                                else -> return@forEach
-                            }
-                            migratedKeys += key
-                        }
-                    }
-                    if (secureEdit.commit()) {
-                        val cleanup = fallbackPrefs.edit()
-                        migratedKeys.forEach { cleanup.remove(it) }
-                        if (!cleanup.commit() && migratedKeys.any { it.startsWith("pwd_") }) {
-                            legacyPasswordCleanupSucceeded = context.deleteSharedPreferences("prefs")
-                        }
-                    }
+        // Settings have one stable store, independent of credential storage availability.
+        // Preserve conflicting legacy values until the user chooses a source.
+        if (!prefs.getBoolean("migration_v2_complete", false)) {
+            val secureValues = runCatching { securePrefs?.all.orEmpty() }.getOrDefault(emptyMap())
+            val legacy = fallbackPrefs.all
+            val editor = prefs.edit()
+            (secureValues.keys + legacy.keys).filterNot { it.startsWith("pwd_") }.forEach { key ->
+                if (prefs.contains(key)) return@forEach
+                val a = secureValues[key]; val b = legacy[key]
+                if (a != null && b != null && a != b) {
+                    putValue(editor, "conflict_secure_$key", a)
+                    putValue(editor, "conflict_fallback_$key", b)
+                } else putValue(editor, key, b ?: a)
+            }
+            if (securePrefs != null) editor.putBoolean("migration_v2_complete", true)
+            settingsAvailable = editor.commit()
+            // Only the credential store receives any legacy plaintext credentials.
+            securePrefs?.let { secure ->
+                val credentials = secure.edit()
+                legacy.filterKeys { it.startsWith("pwd_") }.forEach { (key, value) ->
+                    if (!secure.contains(key) && value is String) credentials.putString(key, value)
                 }
+                credentials.commit()
             }
         }
         // If Keystore or migration is unavailable, do not retain an older plaintext copy.
@@ -106,9 +94,76 @@ class Preferences private constructor(context: Context) {
         securePrefs?.takeIf { isPasswordStorageAvailable }?.getString("pwd_$ssid", null)
     }.getOrNull()
 
-    fun removePassword(ssid: String) {
-        securePrefs?.edit()?.remove("pwd_$ssid")?.apply()
-        fallbackPrefs.edit().remove("pwd_$ssid").apply()
+    fun savedCredentialState(ssid: String): SavedCredentialState {
+        if (!isPasswordStorageAvailable) return SavedCredentialState.UNAVAILABLE
+        return runCatching {
+            if (securePrefs!!.getString("pwd_$ssid", null).isNullOrEmpty()) SavedCredentialState.NOT_SAVED
+            else SavedCredentialState.SAVED
+        }.getOrDefault(SavedCredentialState.UNAVAILABLE)
+    }
+
+    fun removePassword(ssid: String): Boolean = runCatching {
+        securePrefs?.edit()?.remove("pwd_$ssid")?.commit() == true && fallbackPrefs.edit().remove("pwd_$ssid").commit()
+    }.getOrDefault(false)
+
+    val migrationConflicts: List<String>
+        get() = prefs.all.keys.filter { it.startsWith("conflict_secure_") }.map { it.removePrefix("conflict_secure_") }.sorted()
+
+    fun resolveMigrationConflicts(useFallback: Boolean): Boolean {
+        val editor = prefs.edit()
+        migrationConflicts.forEach { key ->
+            putValue(editor, key, prefs.all[(if (useFallback) "conflict_fallback_" else "conflict_secure_") + key])
+            editor.remove("conflict_secure_$key").remove("conflict_fallback_$key")
+        }
+        return editor.commit()
+    }
+
+    private fun putValue(editor: SharedPreferences.Editor, key: String, value: Any?) {
+        when (value) {
+            is String -> editor.putString(key, value)
+            is Boolean -> editor.putBoolean(key, value)
+            is Int -> editor.putInt(key, value)
+            is Long -> editor.putLong(key, value)
+            is Float -> editor.putFloat(key, value)
+            is Set<*> -> editor.putStringSet(key, value.filterIsInstance<String>().toSet())
+            null -> editor.remove(key)
+        }
+    }
+
+    fun transitionSettings(ssid: String, bssid: String): android.os.Bundle = android.os.Bundle().apply {
+        val keys = listOf("wifi_target_mode_$ssid", "wifi_pinned_bssid_$ssid", "mac_policy_$ssid", "pending_mac_policy_$ssid", "pending_mac_address_$ssid", "trusted_security_$ssid", "trusted_radio_${ssid}_${bssid.lowercase()}")
+        keys.forEach { key -> putString(key, prefs.getString(key, null)) }
+        putString("pwd_$ssid", getPassword(ssid))
+    }
+
+    fun restoreTransitionSettings(settings: android.os.Bundle): Boolean {
+        val editor = prefs.edit()
+        var secretOk = true
+        settings.keySet().forEach { key ->
+            val value = settings.getString(key)
+            if (key.startsWith("pwd_")) {
+                // An absent original credential requires removal, not a plaintext fallback.
+                secretOk = if (value == null) securePrefs?.edit()?.remove(key)?.commit() ?: true
+                    else securePrefs?.edit()?.putString(key, value)?.commit() == true
+            } else if (value == null) editor.remove(key) else editor.putString(key, value)
+        }
+        return editor.commit() && secretOk
+    }
+
+    fun commitTransition(ssid: String, bssid: String?, security: String, password: String,
+                         policy: MacAddressPolicy, mode: WifiTargetMode?, establishTrust: Boolean): Boolean {
+        if (!settingsAvailable) return false
+        if (password.isNotEmpty() && !savePassword(ssid, password)) return false
+        val editor = prefs.edit().putString("mac_policy_$ssid", policy.name)
+            .remove("pending_mac_policy_$ssid").remove("pending_mac_address_$ssid")
+        if (mode != null) {
+            editor.putString("wifi_target_mode_$ssid", mode.name)
+            if (mode == WifiTargetMode.PIN_BSSID) editor.putString("wifi_pinned_bssid_$ssid", bssid?.lowercase())
+            else editor.remove("wifi_pinned_bssid_$ssid")
+        }
+        if (establishTrust && bssid != null) editor.putString("trusted_radio_${ssid}_${bssid.lowercase()}", security)
+        if (security in setOf("2", "4")) editor.putString("trusted_security_$ssid", security)
+        return editor.commit()
     }
 
     fun rememberConnectedSecurity(ssid: String, securityType: String) {
@@ -141,6 +196,27 @@ class Preferences private constructor(context: Context) {
         prefs.edit().putString("mac_policy_$ssid", policy.name).apply()
     }
 
+    /** MAC-only rollback never reads or writes Quintz's separate password copy. */
+    fun macTransitionSettings(ssid: String): android.os.Bundle = android.os.Bundle().apply {
+        listOf("mac_policy_$ssid", "pending_mac_policy_$ssid", "pending_mac_address_$ssid").forEach {
+            putString(it, prefs.getString(it, null))
+        }
+    }
+
+    fun commitMacPolicy(ssid: String, policy: MacAddressPolicy, pendingAddress: String?): Boolean {
+        if (!settingsAvailable) return false
+        return prefs.edit().putString("mac_policy_$ssid", policy.name)
+            .putString("pending_mac_policy_$ssid", policy.name.takeIf { pendingAddress != null })
+            .putString("pending_mac_address_$ssid", pendingAddress)
+            .commit()
+    }
+
+    fun isMacPolicyPending(ssid: String, configured: MacAddressPolicy?, observedAddress: String?): Boolean {
+        val expected = prefs.getString("pending_mac_address_$ssid", null) ?: return false
+        return prefs.getString("pending_mac_policy_$ssid", null) == configured?.name &&
+            !expected.equals(observedAddress, ignoreCase = true)
+    }
+
     fun clearMacPolicy(ssid: String) {
         prefs.edit().remove("mac_policy_$ssid").apply()
     }
@@ -163,7 +239,7 @@ class Preferences private constructor(context: Context) {
         }
 
     var isWatchdogEnabled: Boolean
-        get() = prefs.getBoolean("watchdog_enabled", false)
+        get() = settingsAvailable && migrationConflicts.isEmpty() && prefs.getBoolean("watchdog_enabled", false)
         set(value) = prefs.edit().putBoolean("watchdog_enabled", value).apply()
 
     /** Conservatively retain the watchdog if saved targets cannot be read. */

@@ -24,6 +24,19 @@ enum class MacAddressPolicy(val shellFlagValue: String, val displayName: String)
     RANDOMIZED("persistent", "Randomized MAC")
 }
 
+enum class WifiOperationKind {
+    IDLE,
+    PREFER_5GHZ,
+    LOCK_BSSID,
+    UNLOCK_ROAM,
+    CHANGE_MAC_POLICY,
+    RECONNECT
+}
+
+enum class SavedCredentialState(val displayName: String) {
+    SAVED("Yes"), NOT_SAVED("No"), UNAVAILABLE("Storage unavailable")
+}
+
 data class WifiStatus(
     val isConnected: Boolean = false,
     val ssid: String = "",
@@ -37,14 +50,22 @@ data class WifiStatus(
     val securityType: String = "",
     val networkId: Int? = null,
     val observedAtMillis: Long = 0L,
+    val identityObservedAtMillis: Long = 0L,
+    val profileObservedAtMillis: Long = 0L,
     val nativeIdentityLimited: Boolean = false,
     val isLockedToBssid: Boolean = false,
     val lockedBssid: String? = null,
     val isPreferred5GHz: Boolean = false,
-    val isPreferred5GHzFallback: Boolean = false
+    val isPreferred5GHzFallback: Boolean = false,
+    val profileInspectionKnown: Boolean = false,
+    val isPreferenceRequested: Boolean = false,
+    val requestedPinnedBssid: String? = null,
+    val configuredMacPolicy: MacAddressPolicy? = null,
+    val isMacPolicyPending: Boolean = false,
+    val observedMacAddress: String? = null
 ) {
     val isSteeredOrLocked: Boolean
-        get() = isLockedToBssid || isPreferred5GHz || isPreferred5GHzFallback
+        get() = isPreferenceRequested || isLockedToBssid || requestedPinnedBssid != null || isPreferred5GHz || isPreferred5GHzFallback
 }
 
 data class AccessPointRadio(
@@ -57,7 +78,8 @@ data class AccessPointRadio(
     val flags: String,
     val isCurrent: Boolean = false,
     val ageSeconds: Long = 0L,
-    val observedAtMillis: Long = 0L
+    val observedAtMillis: Long = 0L,
+    val observedAtElapsedMillis: Long = 0L
 ) {
     companion object {
         fun frequencyToChannel(freq: Int): Int = when (freq) {

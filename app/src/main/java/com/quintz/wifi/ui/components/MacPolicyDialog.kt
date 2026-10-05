@@ -29,7 +29,9 @@ import com.quintz.wifi.ui.theme.*
 fun MacPolicyDialog(
     targetSsid: String,
     onSelect: (MacAddressPolicy) -> Unit,
-    onCancel: () -> Unit
+    onCancel: () -> Unit,
+    currentPolicy: MacAddressPolicy? = null,
+    selectionDescription: String? = null
 ) {
     Dialog(
         onDismissRequest = onCancel,
@@ -62,10 +64,14 @@ fun MacPolicyDialog(
                     Text("Network: $targetSsid", style = Typography.headlineSmall, color = CliTextPrimary)
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        "Choose how Android identifies this device on this Wi-Fi network. This choice is remembered per SSID.",
+                        selectionDescription ?: "Choose how Android identifies this device on this Wi-Fi network. This choice is remembered per SSID.",
                         style = Typography.bodyMedium,
                         color = CliTextSecondary
                     )
+                    currentPolicy?.let {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Android configured: ${it.displayName}", style = CliTypography.CodeMono, color = CliTextTertiary)
+                    }
                     Spacer(modifier = Modifier.height(18.dp))
                     CliButton(
                         text = "USE DEVICE MAC (STATIC DHCP)",

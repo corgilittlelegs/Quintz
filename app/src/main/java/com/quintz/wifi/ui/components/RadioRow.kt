@@ -26,6 +26,8 @@ fun CliRadioRow(
     onUnpinClick: () -> Unit,
     isOperating: Boolean,
     modifier: Modifier = Modifier,
+    canBind: Boolean = true,
+    canUnpin: Boolean = true,
     asCard: Boolean = false
 ) {
     val is5G = radio.band == BandType.BAND_5_GHZ || radio.band == BandType.BAND_6_GHZ
@@ -91,7 +93,7 @@ fun CliRadioRow(
                 // Line 3: Channel Info before Hardware BSSID / MAC Address
                 val channelPrefix = if (radio.channel > 0) "Ch ${radio.channel} · " else ""
                 Text(
-                    text = "$channelPrefix${radio.bssid}",
+                    text = "$channelPrefix${radio.bssid} · ${if (radio.ageSeconds == Long.MAX_VALUE) "age unknown" else "${radio.ageSeconds}s old"}${if (!canBind) " · stale / no access" else ""}",
                     style = CliTypography.CodeMono,
                     color = CliTextTertiary,
                     fontSize = 11.5.sp,
@@ -115,7 +117,7 @@ fun CliRadioRow(
                     },
                     size = CliButtonSize.Compact,
                     variant = CliButtonVariant.Outlined,
-                    enabled = !isOperating,
+                    enabled = !isOperating && (if (isPinned) canUnpin else canBind),
                     onClick = if (isPinned) onUnpinClick else onLockClick
                 )
             }

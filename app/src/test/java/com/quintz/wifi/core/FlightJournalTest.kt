@@ -87,4 +87,14 @@ class FlightJournalTest {
             directory.deleteRecursively()
         }
     }
+    @Test fun exportedSnapshotDoesNotChangeWhenJournalContinuesWriting() {
+        val directory = Files.createTempDirectory("quintz-journal-test").toFile()
+        val snapshot = Files.createTempDirectory("quintz-snapshot-test").toFile()
+        try {
+            val journal = FlightJournal(directory); journal.append("before snapshot")
+            val files = journal.snapshotFiles(snapshot); journal.append("after snapshot")
+            assertTrue(files.single().readText().contains("before snapshot"))
+            assertFalse(files.single().readText().contains("after snapshot"))
+        } finally { directory.deleteRecursively(); snapshot.deleteRecursively() }
+    }
 }

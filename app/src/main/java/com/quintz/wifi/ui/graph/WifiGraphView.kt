@@ -363,12 +363,13 @@ fun WifiGraphView(
             ) {
                 // RSSI Pill
                 val rssiColor = when {
+                    state.activeRssi !in -126..-1 -> CliTextTertiary
                     state.activeRssi >= -65 -> CliAccentGreen
                     state.activeRssi >= -75 -> CliAccent24GHz
                     else -> CliAccentRed
                 }
                 CliBadge(
-                    text = "RSSI: ${state.activeRssi} dBm",
+                    text = if (state.activeRssi in -126..-1) "RSSI: ${state.activeRssi} dBm" else "RSSI: —",
                     accentColor = rssiColor,
                     backgroundColor = rssiColor.copy(alpha = 0.12f),
                     borderColor = rssiColor.copy(alpha = 0.4f)
@@ -397,7 +398,7 @@ fun WifiGraphView(
                 // Roam Status Pill
                 if (state.roamAdvantageDbm >= 6) {
                     CliBadge(
-                        text = "ROAM ADVANTAGE: +${state.roamAdvantageDbm} dBm",
+                        text = "SIGNAL ADVANTAGE: +${state.roamAdvantageDbm} dBm",
                         accentColor = CliAccent24GHz,
                         backgroundColor = CliAccent24GHzBg,
                         borderColor = CliAccent24GHz.copy(alpha = 0.5f)
@@ -846,7 +847,7 @@ private fun CandidateApCard(
                 }
 
                 Text(
-                    text = "Signal: ${candidate.latestRssi} dBm · ${ageSeconds}s ago" +
+                    text = "${candidate.eligibilityReason ?: "Eligible for automatic recovery"} · Signal: ${candidate.latestRssi} dBm · ${ageSeconds}s ago" +
                         if (isFresh) " · advantage $deltaText" else " · stale",
                     style = CliTypography.CodeMono,
                     color = if (isFresh) deltaColor else CliTextTertiary,

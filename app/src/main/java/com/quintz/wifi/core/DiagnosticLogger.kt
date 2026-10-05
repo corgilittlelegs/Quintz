@@ -26,7 +26,25 @@ object DiagnosticLogger {
     private const val TAG = "QuintzDiag"
     private const val MAX_ENTRIES = 500
 
-    private val entries = ConcurrentLinkedDeque<String>()
+    private val entries = java.util.ArrayDeque<String>()
+    private val entriesLock = Any()
+    private val dropped = java.util.concurrent.atomic.AtomicLong()
+    private val writer = java.util.concurrent.ThreadPoolExecutor(1, 1, 0L, java.util.concurrent.TimeUnit.MILLISECONDS,
+        java.util.concurrent.ArrayBlockingQueue<Runnable>(128), { r -> Thread(r, "quintz-journal").apply { isDaemon = true } })
+    private fun enqueue(action: () -> Unit) {
+        try { writer.execute {
+            try {
+                synchronized(journalLock) {
+                    val count = dropped.getAndSet(0)
+                    if (count > 0) journal?.append("[DROPPED] $count diagnostic events exceeded the writer queue")
+                    action()
+                }
+            } catch (_: Exception) { Log.e(TAG, "Flight recorder write failed") }
+        } } catch (_: java.util.concurrent.RejectedExecutionException) { dropped.incrementAndGet() }
+    }
+    private fun flush() {
+        runCatching { writer.submit {}.get(2, java.util.concurrent.TimeUnit.SECONDS) }
+    }
     private val timeFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     private val timeFormatLock = Any()
     private val journalLock = Any()
@@ -56,6 +74,9 @@ object DiagnosticLogger {
             try {
                 // Exception messages can contain network credentials. Keep the type and call stack.
                 log("CRASH", "FATAL thread='${thread.name}' type=${throwable.javaClass.name} stack=${throwable.stackTrace.joinToString(" <- ")}")
+                flush()
+                // A saturated queue must still retain the crash type and stack.
+                synchronized(journalLock) { journal?.append("[CRASH] type=${throwable.javaClass.name} stack=${throwable.stackTrace.joinToString(" <- ")}") }
             } catch (_: Exception) {}
             defaultHandler?.uncaughtException(thread, throwable)
         }
@@ -69,17 +90,13 @@ object DiagnosticLogger {
         val date = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
         val entry = "[$date $timestamp] [pid=${Process.myPid()}] [$tag] $sanitizedMessage"
 
-        entries.addLast(entry)
-        while (entries.size > MAX_ENTRIES) {
-            entries.pollFirst()
+        synchronized(entriesLock) {
+            entries.addLast(entry)
+            while (entries.size > MAX_ENTRIES) entries.removeFirst()
         }
 
         Log.d(TAG, entry)
-        try {
-            synchronized(journalLock) { journal?.append(entry) }
-        } catch (e: Exception) {
-            Log.e(TAG, "Flight recorder write failed", e)
-        }
+        enqueue { journal?.append(entry) }
     }
 
     fun logCommand(
@@ -123,34 +140,26 @@ object DiagnosticLogger {
 
     fun getRecentLogs(): List<String> {
         if (!BuildConfig.DEBUG) return emptyList()
-        return entries.toList()
+        return synchronized(entriesLock) { entries.toList() }
     }
 
     fun clearLogs() {
         if (!BuildConfig.DEBUG) return
-        entries.clear()
-        synchronized(journalLock) { journal?.clear() }
+        synchronized(entriesLock) { entries.clear() }
+        enqueue { journal?.clear() }
         log("DIAG", "Logs cleared by user")
     }
 
     fun heartbeat(enabled: Boolean, shizukuReady: Boolean) {
         if (!BuildConfig.DEBUG) return
         log("HEARTBEAT", "watchdog enabled=$enabled shizukuReady=$shizukuReady")
-        try {
-            synchronized(journalLock) { journal?.markHeartbeat(Process.myPid(), enabled) }
-        } catch (e: Exception) {
-            Log.e(TAG, "Heartbeat state write failed", e)
-        }
+        enqueue { journal?.markHeartbeat(Process.myPid(), enabled) }
     }
 
     fun watchdogServiceStopped() {
         if (!BuildConfig.DEBUG) return
         log("SERVICE", "WatchdogService onDestroy")
-        try {
-            synchronized(journalLock) { journal?.markServiceStop() }
-        } catch (e: Exception) {
-            Log.e(TAG, "Service stop state write failed", e)
-        }
+        enqueue { journal?.markServiceStop() }
     }
 
     private fun recordPreviousExits(context: Context) {
@@ -177,11 +186,18 @@ object DiagnosticLogger {
         try {
             val export = withContext(Dispatchers.IO) {
                 val exportDir = File(context.cacheDir, "diagnostic_exports").apply { mkdirs() }
-                val output = File(exportDir, "quintz-flight-recorder.zip")
+                val output = File(exportDir, "quintz-flight-recorder-${UUID.randomUUID()}.zip")
                 val report = buildDiagnosticReport(context, statusSummary)
-                ZipOutputStream(output.outputStream().buffered()).use { zip ->
-                    synchronized(journalLock) { journal?.writeZip(zip, report) }
-                }
+                val snapshotDir = File(context.cacheDir, "journal-snapshot-${UUID.randomUUID()}")
+                try {
+                    val files = writer.submit<List<File>> { synchronized(journalLock) { journal?.snapshotFiles(snapshotDir).orEmpty() } }.get()
+                    ZipOutputStream(output.outputStream().buffered()).use { zip ->
+                        zip.putNextEntry(java.util.zip.ZipEntry("report.txt")); zip.write(report.toByteArray()); zip.closeEntry()
+                        files.forEach { file ->
+                            zip.putNextEntry(java.util.zip.ZipEntry(file.name)); file.inputStream().use { it.copyTo(zip) }; zip.closeEntry()
+                        }
+                    }
+                } finally { snapshotDir.deleteRecursively() }
                 output
             }
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.diagnostics", export)
@@ -221,8 +237,8 @@ object DiagnosticLogger {
             sb.appendLine(statusSummary)
         }
 
-        sb.appendLine("\n--- Event Log (Last ${entries.size} entries) ---")
-        entries.forEach { entry ->
+        sb.appendLine("\n--- Event Log (Last ${getRecentLogs().size} entries) ---")
+        getRecentLogs().forEach { entry ->
             sb.appendLine(entry)
         }
         sb.appendLine("\n=== End of Report ===")
@@ -233,7 +249,7 @@ object DiagnosticLogger {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val clip = ClipData.newPlainText("Quintz Diagnostics", report)
         clipboard.setPrimaryClip(clip)
-        Toast.makeText(context, "Diagnostics copied to clipboard (${entries.size} events)", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "Diagnostics copied to clipboard (${getRecentLogs().size} events)", Toast.LENGTH_SHORT).show()
     }
 
     fun shareReport(context: Context, report: String) {

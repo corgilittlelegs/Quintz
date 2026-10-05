@@ -88,6 +88,13 @@ internal class FlightJournal(
     @Synchronized
     fun snapshot(): List<Pair<String, ByteArray>> = segments().map { it.name to it.readBytes() }
 
+    /** Copy immutable segment files while ordered with writes; compression happens elsewhere. */
+    @Synchronized
+    fun snapshotFiles(destination: File): List<File> {
+        check(destination.mkdirs() || destination.isDirectory)
+        return segments().map { file -> file.copyTo(File(destination, file.name), overwrite = false) }
+    }
+
     @Synchronized
     fun writeZip(zip: ZipOutputStream, report: String) {
         zip.putNextEntry(ZipEntry("report.txt"))

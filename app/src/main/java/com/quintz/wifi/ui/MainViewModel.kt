@@ -22,6 +22,9 @@ import com.quintz.wifi.model.AccessPointRadio
 import com.quintz.wifi.model.BandType
 import com.quintz.wifi.model.ShizukuState
 import com.quintz.wifi.model.WifiStatus
+import com.quintz.wifi.model.SavedCredentialState
+import com.quintz.wifi.model.WifiOperationKind
+import com.quintz.wifi.core.MacPolicyChangeResult
 import com.quintz.wifi.service.QuickTileSpec
 import com.quintz.wifi.service.TileService
 import com.quintz.wifi.service.TileStateTracker
@@ -68,8 +71,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val wifiStatus: StateFlow<WifiStatus> = controller.status
     val radios: StateFlow<List<AccessPointRadio>> = controller.radios
     val isOperating: StateFlow<Boolean> = controller.isOperating
+    val currentOperation: StateFlow<WifiOperationKind> = controller.currentOperation
     val isScanning: StateFlow<Boolean> = controller.isScanning
     val isScanQueued: StateFlow<Boolean> = controller.isScanQueued
+    private val _savedCredentialState = MutableStateFlow(prefs.savedCredentialState(""))
+    val savedCredentialState: StateFlow<SavedCredentialState> = _savedCredentialState.asStateFlow()
 
     private val messageChannel = Channel<String>(Channel.UNLIMITED)
     val messages = messageChannel.receiveAsFlow()
@@ -184,21 +190,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         checkTileStatus()
 
         viewModelScope.launch {
-            var initialConnectedStatusHandled = false
-            wifiStatus.collect { status ->
+            wifiStatus.collect {
+                _savedCredentialState.value = prefs.savedCredentialState(it.ssid)
                 recordTelemetrySample()
-                if (status.isConnected && !initialConnectedStatusHandled) {
-                    initialConnectedStatusHandled = true
-                    if ((status.isPreferred5GHz || status.isPreferred5GHzFallback) && !prefs.isWatchdogEnabled) {
-                        toggleWatchdog(true)
-                    }
-                }
             }
         }
 
         viewModelScope.launch {
             shizukuState.collect { state ->
                 if (state.isPermissionGranted) {
+                    if (!controller.recoverPendingProfile()) { postMessage(controller.actionFailureMessage); return@collect }
                     refreshAll()
                     if (prefs.isWatchdogEnabled) {
                         try {
@@ -213,7 +214,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             android.util.Log.e("MainVM", "Failed to auto-start Watchdog", e)
                         }
                     }
-                }
+                } else controller.invalidateRadios()
             }
         }
     }
@@ -223,7 +224,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (pollingJob?.isActive != true) {
             pollingJob = viewModelScope.launch {
                 while (isActive) {
-                    if (!controller.isOperating.value && (!telemetryRequested || _telemetryState.value.isPaused)) {
+                    if (!controller.isOperating.value && (!telemetryRequested || _telemetryState.value.isPaused || System.currentTimeMillis() - controller.status.value.profileObservedAtMillis > 60_000L)) {
                         controller.refreshStatus()
                     }
                     delay(2500)
@@ -231,11 +232,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         if (scannerRequested) startScannerPolling()
-        startTelemetryPolling()
+        if (telemetryRequested && !_telemetryState.value.isPaused) startTelemetryPolling()
     }
 
     private fun startTelemetryPolling() {
-        if (telemetryJob?.isActive == true) return
+        if (!isForeground || !telemetryRequested || _telemetryState.value.isPaused || telemetryJob?.isActive == true) return
         telemetryJob = viewModelScope.launch {
             while (isActive) {
                 val cycleStarted = android.os.SystemClock.elapsedRealtime()
@@ -246,6 +247,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         nativeTelemetryObservation = connectedTelemetryObservation(
                             native, controller.status.value, observedAt
                         )
+                        nativeTelemetryObservation?.let { controller.publishConnectedObservation(it) }
                         // Devices without location access redact the identity. Read identity and RSSI
                         // together through the existing status path rather than attaching an unknown radio.
                         if (nativeTelemetryObservation == null) controller.refreshStatus()
@@ -272,7 +274,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setTelemetryActive(active: Boolean) {
         telemetryRequested = active
-        if (!active) nativeTelemetryObservation = null
+        if (!active) stopTelemetryPolling() else if (isForeground && !_telemetryState.value.isPaused) startTelemetryPolling()
     }
 
     fun startScannerPolling() {
@@ -310,7 +312,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             isPaused = paused,
             nowTimestampMillis = if (paused) System.currentTimeMillis() else _telemetryState.value.nowTimestampMillis
         )
-        if (!paused) recordTelemetrySample()
+        if (paused) stopTelemetryPolling() else { startTelemetryPolling(); recordTelemetrySample() }
     }
 
     fun clearTelemetryHistory() {
@@ -331,7 +333,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectCandidateBssid(bssid: String?) {
-        if (_telemetryState.value.isPaused) return
+        if (!isForeground || !telemetryRequested || _telemetryState.value.isPaused) return
         _telemetryState.value = _telemetryState.value.copy(
             selectedCandidateBssid = bssid
         )
@@ -445,6 +447,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 band = cand.band,
                 latestRssi = cand.rssi,
                 colorIndex = candidateColorIndex(cand.bssid),
+                eligibilityReason = apList.firstOrNull { it.bssid.equals(cand.bssid, true) }?.let { radio ->
+                    com.quintz.wifi.core.WatchdogEligibility.rejection(status, radio, prefs.getWifiTargetMode(status.ssid) ?: WifiTargetMode.AUTO,
+                        prefs.getPinnedBssid(status.ssid), prefs.getTrustedRadioSecurity(status.ssid, radio.bssid), prefs.recoveryThresholdRssi,
+                        android.os.SystemClock.elapsedRealtime())
+                } ?: if (!candidatesMap.containsKey(cand.bssid.lowercase())) "Missing from the latest scan" else null,
                 isInLatestScan = candidatesMap.containsKey(cand.bssid.lowercase()),
                 observedAtMillis = cand.observedAtMillis
             )
@@ -577,58 +584,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId source=$requestSource action=set_mac_policy ssid='$ssid' policy=${policy.displayName}")
         viewModelScope.launch {
-            val status = controller.refreshStatus()
-            if (status.isConnected && status.ssid == ssid) {
-                val pass = prefs.getPassword(ssid).orEmpty()
-                val isSecured = status.securityType != "0" && status.securityType != "6"
-                val shellSecurity = when (status.securityType) {
-                    "0" -> "open"
-                    "6" -> "owe"
-                    "4" -> "wpa3"
-                    else -> "wpa2"
-                }
-                if (isSecured && pass.isEmpty()) {
-                    postMessage(if (prefs.isPasswordStorageAvailable) "Save this network's password before applying a MAC change" else securePasswordError)
-                    return@launch
-                }
-                val previousPolicy = prefs.getMacPolicy(ssid)
-                val targetMode = prefs.getOrMigrateWifiTargetMode(ssid, status.lockedBssid)
-                val success = when (targetMode) {
-                    WifiTargetMode.PIN_BSSID -> {
-                        val pinnedBssid = prefs.getPinnedBssid(ssid) ?: status.lockedBssid
-                        if (pinnedBssid.isNullOrBlank()) {
-                            postMessage("No pinned radio is saved for this network; choose one in the app first")
-                            return@launch
-                        }
-                        controller.lockToBssid(
-                            ssid, pinnedBssid, pass, securityType = shellSecurity, macAddressPolicy = policy,
-                            requestSource = requestSource, correlationId = correlationId
-                        )
-                    }
-                    WifiTargetMode.PREFER_5_GHZ -> controller.autoSelectAndLock5Ghz(
-                        ssid, pass, policy, requestSource = requestSource, correlationId = correlationId
-                    )
-                    WifiTargetMode.AUTO -> controller.unlockToAuto(
-                        ssid, pass, securityType = shellSecurity, macAddressPolicy = policy,
-                        requestSource = requestSource, correlationId = correlationId
-                    )
-                }
-                if (success) {
-                    prefs.setMacPolicy(ssid, policy)
-                    postMessage("MAC mode changed to ${policy.displayName}; ${targetMode.name.replace('_', ' ')} kept")
-                } else {
-                    if (previousPolicy == null) prefs.clearMacPolicy(ssid) else prefs.setMacPolicy(ssid, previousPolicy)
-                    postMessage(when {
-                        controller.lastPasswordStorageFailure -> securePasswordError
-                        targetMode == WifiTargetMode.PREFER_5_GHZ -> "MAC mode unchanged: choose and connect to a trusted 5 GHz radio in the app, then retry"
-                        else -> "MAC mode change could not be verified. Previous preference kept; check the active connection"
-                    })
-                }
-                refreshAll()
-            } else {
-                prefs.setMacPolicy(ssid, policy)
-                postMessage("MAC mode saved for the next Quintz action on this network")
-            }
+            val result = controller.changeMacPolicy(ssid, policy)
+            DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId source=$requestSource action=set_mac_policy result=$result")
+            postMessage(when (result) {
+                MacPolicyChangeResult.UNCHANGED -> "${policy.displayName} is already configured. No reconnect requested."
+                MacPolicyChangeResult.SAVED -> "${policy.displayName} saved in Android. Applies on next connection; no reconnect requested."
+                MacPolicyChangeResult.RECONNECTED -> "${policy.displayName} verified after reconnect. Steering mode kept."
+                MacPolicyChangeResult.FAILED -> controller.macPolicyFailureMessage
+            })
+            controller.refreshStatus(forceFresh = true)
         }
     }
 
@@ -685,20 +649,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId source=$requestSource result=${if (success) "success" else "failure"} action=prefer_5ghz")
             refreshAll()
             if (success) {
-                if (approvedBssid != null) {
-                    val verified = controller.status.value
-                    if (verified.isConnected && verified.ssid == status.ssid &&
-                        verified.bssid.equals(approvedBssid, ignoreCase = true)) {
-                        prefs.trustSelectedRadio(status.ssid, approvedBssid, verified.securityType)
-                    }
-                }
                 val watchdogStarted = toggleWatchdog(true)
-                postMessage("Preferred 5 GHz active with roaming allowed (${policy.displayName})" +
+                postMessage("Preferred 5 GHz active; saved MAC setting: ${policy.displayName}" +
                     if (watchdogStarted) "; Watchdog active" else "; Watchdog could not start")
             } else {
                 postMessage(when {
                     controller.lastPasswordStorageFailure -> securePasswordError
-                    approvedBssid != null -> "Could not verify the selected 5 GHz radio. Rescan and retry."
+                    approvedBssid != null -> controller.actionFailureMessage
                     else -> "Choose and connect to a 5 GHz radio in the app once to trust it, then retry. The radio must also be fresh and compatible."
                 })
             }
@@ -737,18 +694,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             refreshAll()
             if (success) {
                 val verified = controller.status.value
-                val trusted = if (verified.isConnected && verified.ssid == targetSsid &&
-                    verified.bssid.equals(radio.bssid, ignoreCase = true)) {
-                    prefs.trustSelectedRadio(targetSsid, radio.bssid, verified.securityType)
-                } else false
-                postMessage("Locked to AP [${radio.bssid}] on ${radio.band.displayName} (${policy.displayName})" +
+                val trusted = prefs.getTrustedRadioSecurity(targetSsid, radio.bssid) != null
+                postMessage("Locked to AP [${radio.bssid}] on ${radio.band.displayName}; saved MAC setting: ${policy.displayName}" +
                     (if (trusted) "; trusted for future automatic steering" else "; automatic recovery is unavailable until this radio can be trusted") +
                     (if (trusted && !prefs.isWatchdogEnabled) "; turn on Watchdog for automatic recovery" else ""))
             } else {
                 postMessage(when {
                     controller.lastPasswordStorageFailure -> securePasswordError
                     !WifiSecurityPolicy.isSupported(radio.flags) -> "This radio's security could not be verified; no connection was changed"
-                    else -> "Could not confirm lock to [${radio.bssid}]. Check signal strength."
+                    else -> controller.actionFailureMessage
                 })
             }
         }
@@ -775,7 +729,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     else -> "Auto-Roam active"
                 })
             } else {
-                postMessage("Failed to unlock to Auto")
+                postMessage(controller.actionFailureMessage)
             }
             refreshAll()
         }
@@ -824,6 +778,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _showBatteryOptimizationPrompt.value = false
     }
 
+    fun forgetPassword(ssid: String) {
+        val status = controller.status.value
+        if (status.isConnected && status.ssid == ssid && status.isSteeredOrLocked) {
+            postMessage("Unlock to auto-roam before removing credentials.")
+            return
+        }
+        postMessage(if (prefs.removePassword(ssid)) "Password removed from Quintz. Android's saved network was kept." else securePasswordError)
+        _savedCredentialState.value = prefs.savedCredentialState(controller.status.value.ssid)
+    }
+    fun replacePassword(password: String) {
+        viewModelScope.launch {
+            val current = controller.refreshStatus(forceFresh = true)
+            if (!current.isConnected || current.securityType !in setOf("2", "4")) {
+                postMessage("Connect to a secured network first.")
+                return@launch
+            }
+            if (current.isSteeredOrLocked) {
+                postMessage("Unlock to auto-roam before changing saved credentials.")
+                return@launch
+            }
+            if (!prefs.isPasswordStorageAvailable) {
+                postMessage(securePasswordError)
+                return@launch
+            }
+            val saved = prefs.savePassword(current.ssid, password)
+            if (saved) {
+                prefs.rememberConnectedSecurity(current.ssid, current.securityType)
+                postMessage("Password saved in Quintz.")
+            } else {
+                postMessage(securePasswordError)
+            }
+            _savedCredentialState.value = prefs.savedCredentialState(controller.status.value.ssid)
+        }
+    }
+
     fun getSavedPassword(ssid: String): String = prefs.getPassword(ssid).orEmpty()
 
     private var tileStatusJob: Job? = null
@@ -845,7 +834,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun queryIsTileAdded(): Boolean {
+    private suspend fun queryIsTileAdded(): Boolean {
         // 1. Query via Shizuku: inspect sysui_qs_tiles in secure settings
         if (ShizukuManager.isReady()) {
             try {

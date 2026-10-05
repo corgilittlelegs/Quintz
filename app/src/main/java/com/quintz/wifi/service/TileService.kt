@@ -102,8 +102,9 @@ class TileService : android.service.quicksettings.TileService() {
                 val shellSecurity = when (current.securityType) {
                     "0" -> "open"
                     "6" -> "owe"
+                    "2" -> "wpa2"
                     "4" -> "wpa3"
-                    else -> "wpa2"
+                    else -> { withContext(Dispatchers.Main) { Toast.makeText(this@TileService, "Quintz: Network security is unknown. Refresh in the app.", Toast.LENGTH_LONG).show() }; return@launch }
                 }
 
                 if (prefs.getOrMigrateWifiTargetMode(current.ssid, current.lockedBssid) != WifiTargetMode.AUTO) {
@@ -121,7 +122,7 @@ class TileService : android.service.quicksettings.TileService() {
                     val watchdogStopped = success && WatchdogControl.stopIfNoTargets(this@TileService, prefs)
                     withContext(Dispatchers.Main) {
                         val message = when {
-                            !success -> "Quintz: Could not verify Auto-Roam; try again in the app"
+                            !success -> "Quintz: ${controller.actionFailureMessage}"
                             watchdogStopped -> "Quintz: Auto-Roam active; Watchdog stopped"
                             prefs.isWatchdogEnabled -> "Quintz: Auto-Roam active; Watchdog kept for other networks"
                             else -> "Quintz: Auto-Roam active"
@@ -166,7 +167,7 @@ class TileService : android.service.quicksettings.TileService() {
                                 val message = if (controller.lastPasswordStorageFailure) {
                                     "Quintz: Secure password storage is unavailable. Unlock the device and retry in the app"
                                 } else {
-                                    "Quintz: Choose and connect to a 5 GHz radio in the app once to trust it"
+                                    "Quintz: ${controller.actionFailureMessage}"
                                 }
                                 Toast.makeText(this@TileService, message, Toast.LENGTH_LONG).show()
                             }

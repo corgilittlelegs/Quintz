@@ -39,4 +39,10 @@ class ConnectedTelemetryPolicyTest {
         assertTrue(startsNewTelemetrySegment(previous, next.copy(timestamp = 17_501)))
         assertTrue(startsNewTelemetrySegment(previous, previous))
     }
+    @Test fun redactedGraphUpdatesDoNotExtendTheLastIdentityVerification() {
+        val known = com.quintz.wifi.model.WifiStatus(isConnected = true, ssid = "Test", bssid = "aa:bb:cc:dd:ee:ff", frequency = 5180, rssi = -60, networkId = 1,
+            observedAtMillis = 9000, identityObservedAtMillis = 1000)
+        val redacted = known.copy(ssid = "", bssid = "", nativeIdentityLimited = true)
+        org.junit.Assert.assertNull(connectedTelemetryObservation(redacted, known, 9000))
+    }
 }

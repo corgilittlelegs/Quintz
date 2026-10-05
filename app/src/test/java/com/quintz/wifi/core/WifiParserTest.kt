@@ -127,13 +127,13 @@ class WifiParserTest {
             30:de:4b:31:55:2e  2417           -64            INVALID      Archer_2G   [WPA2-PSK-CCMP]
         """.trimIndent()
 
-        // With maxAgeSeconds = 15L, 4.269 should parse to 4L and be accepted.
+        // With maxAgeSeconds = 15L, 4.269 must round up to 5L and be accepted.
         // "INVALID" must fail closed (Long.MAX_VALUE) and be rejected as stale.
         val results = WifiParser.parseScanResults(scanOutput, "Archer_5G", "30:de:4b:31:55:30")
 
         assertEquals(1, results.size)
         assertEquals("30:de:4b:31:55:30", results[0].bssid)
-        assertEquals(4L, results[0].ageSeconds)
+        assertEquals(5L, results[0].ageSeconds)
     }
 
     @Test
@@ -198,5 +198,20 @@ class WifiParserTest {
         assertNull(WifiParser.parseNetworkId(networks, "Home", 11, "2"))
         assertNull(WifiParser.parseNetworkId(networks, "Home", 12, "2"))
         assertNull(WifiParser.parseNetworkId(networks, "Home", 13, "2"))
+    }
+    @Test fun invalidOrFutureAgesAreRejectedAndFractionalBoundaryIsConservative() {
+        val input = """
+            aa:bb:cc:dd:ee:01 5180 -50 -1 Net [WPA2-PSK][ESS]
+            aa:bb:cc:dd:ee:02 5180 -50 NaN Net [WPA2-PSK][ESS]
+            aa:bb:cc:dd:ee:03 5180 -50 Infinity Net [WPA2-PSK][ESS]
+            aa:bb:cc:dd:ee:04 5180 -50 8.001 Net [WPA2-PSK][ESS]
+            aa:bb:cc:dd:ee:05 5180 -50 8.000 Net [WPA2-PSK][ESS]
+        """.trimIndent()
+        val radios = WifiParser.parseScanResults(input, "Net", "", maxAgeSeconds = 8)
+        assertEquals(listOf("aa:bb:cc:dd:ee:05"), radios.map { it.bssid })
+    }
+    @Test fun duplicateRadioUsesNewestObservationBeforeSignalStrength() {
+        val input = "aa:bb:cc:dd:ee:01 5180 -40 7 Net [ESS]\naa:bb:cc:dd:ee:01 5180 -70 1 Net [ESS]"
+        assertEquals(-70, WifiParser.parseScanResults(input, "", "").single().rssi)
     }
 }

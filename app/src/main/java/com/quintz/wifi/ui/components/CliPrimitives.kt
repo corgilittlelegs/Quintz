@@ -215,6 +215,7 @@ fun CliSignalBars(
     showDbmText: Boolean = true
 ) {
     val activeBars = when {
+        rssi !in -126..-1 -> 0
         rssi >= -55 -> 4
         rssi >= -67 -> 3
         rssi >= -78 -> 2
@@ -223,6 +224,7 @@ fun CliSignalBars(
     }
 
     val activeColor = when {
+        rssi !in -126..-1 -> CliTextTertiary
         activeBars >= 3 -> CliAccentGreen
         activeBars == 2 -> CliAccent24GHz
         else -> CliAccentRed
@@ -253,7 +255,7 @@ fun CliSignalBars(
         if (showDbmText) {
             Spacer(modifier = Modifier.width(4.dp))
             Text(
-                text = "$rssi dBm",
+                text = if (rssi in -126..-1) "$rssi dBm" else "—",
                 style = CliTypography.CodeMono,
                 color = activeColor,
                 fontWeight = FontWeight.SemiBold
