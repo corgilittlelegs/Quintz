@@ -167,10 +167,10 @@ Some profile-access/recovery tests require authorized Shizuku and specific devic
 | Workflow | Trigger | Result |
 | --- | --- | --- |
 | [Verify app](.github/workflows/verify.yml) | Push to `main` or pull request | Unit tests, lint, both build variants, instrumentation packaging, and Android emulator tests |
-| [Build Debug APK](.github/workflows/debug-apk.yml) | Manual **Run workflow** | An installable debug APK in the completed run's **Artifacts** section; retained for 14 days |
+| [Build Debug APK](.github/workflows/debug-apk.yml) | Manual **Run workflow** | A **Debug** prerelease under **Releases**, tagged `debug-<run number>-<attempt>`, plus an Actions artifact retained for 14 days |
 | [Release APK](.github/workflows/release.yml) | Manual **Run workflow** on `main`, with `patch`, `minor`, or `major` | Tests/lint, release build, external signing, and a public GitHub release with APK and SHA-256 checksum |
 
-Commit and sync the intended changes before running a manual build. The debug workflow uses optional `DEBUG_KEYSTORE_BASE64` for a stable debug key; without it, its temporary key may prevent installing a later run over an existing debug build. Download and extract the `Quintz-debug-<run number>` artifact ZIP to obtain the APK.
+Commit and sync the intended changes before running a manual build. The debug workflow requires `DEBUG_KEYSTORE_BASE64` and reuses that signing key for every build; it fails if the key is missing or invalid. Download `app-debug.apk` directly from its **Debug** prerelease in **Releases**, or extract the `Quintz-debug-<run number>-<attempt>` Actions artifact ZIP. Both include the APK checksum and build details with the signing certificate fingerprint. Debug releases are marked **Pre-release** and do not replace the latest stable release. See [debug signing and updates](docs/debug-signing.md) for setup and migration.
 
 Syncing code does not publish a release. Release signing secrets must be configured first; the workflow rejects missing signing material and checks that `main` still matches the release commit before publishing. The optional `./release.sh [patch|minor|major]` command dispatches the same release workflow through GitHub CLI.
 
