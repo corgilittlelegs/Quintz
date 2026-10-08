@@ -2,12 +2,22 @@ name: Build Debug APK
 
 on:
   workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Upcoming release version: patch, minor, or major'
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 permissions:
   contents: read
 
 concurrency:
-  group: debug-release-${{ github.run_id }}
+  group: publish-debug-release
   cancel-in-progress: false
 
 jobs:
@@ -19,6 +29,9 @@ jobs:
       commit_sha: ${{ steps.version.outputs.commit_sha }}
       artifact_name: ${{ steps.version.outputs.artifact_name }}
       release_title: ${{ steps.version.outputs.release_title }}
+      apk_name: ${{ steps.version.outputs.apk_name }}
+      stable_tag: ${{ steps.version.outputs.stable_tag }}
+      version_code: ${{ steps.version.outputs.version_code }}
 
     steps:
       - name: Check out source
@@ -44,10 +57,32 @@ jobs:
           keytool -list -keystore "$RUNNER_TEMP/ci-debug.keystore" \
             -storepass android -alias androiddebugkey >/dev/null
 
-      - name: Set debug version code
+      - name: Determine upcoming debug version
         id: version
+        env:
+          RELEASE_BUMP: ${{ inputs.bump }}
         run: |
           set -euo pipefail
+          LATEST_TAG=$(git tag --sort=-version:refname --list 'v[0-9]*' | sed -n '1p')
+          if ! [[ "$LATEST_TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Latest stable version tag is missing or invalid: $LATEST_TAG" >&2
+            exit 1
+          fi
+          MAJOR=${BASH_REMATCH[1]}
+          MINOR=${BASH_REMATCH[2]}
+          PATCH=${BASH_REMATCH[3]}
+          if ! git merge-base --is-ancestor "$LATEST_TAG" HEAD; then
+            echo "Debug source must include the latest stable release: $LATEST_TAG" >&2
+            exit 1
+          fi
+          case "$RELEASE_BUMP" in
+            patch) PATCH=$((PATCH + 1)) ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            *) echo "Invalid release bump: $RELEASE_BUMP" >&2; exit 1 ;;
+          esac
+          VERSION_NAME="$MAJOR.$MINOR.$PATCH"
+          APK_NAME="Quintz-${VERSION_NAME}-debug.apk"
           # The offset is above historical CI/local commit-count codes. Every
           # new workflow run increases the code, including builds of older refs.
           if ! [[ "$GITHUB_RUN_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]]; then
@@ -60,15 +95,21 @@ jobs:
             exit 1
           fi
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
-          echo "tag_name=debug-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "APK_NAME=$APK_NAME" >> "$GITHUB_ENV"
+          echo "tag_name=debug-v${VERSION_NAME}" >> "$GITHUB_OUTPUT"
           echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "artifact_name=Quintz-debug-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
-          echo "release_title=Quintz Debug #${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=Quintz-${VERSION_NAME}-debug" >> "$GITHUB_OUTPUT"
+          echo "release_title=Quintz ${VERSION_NAME}-debug" >> "$GITHUB_OUTPUT"
+          echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
+          echo "stable_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
 
       - name: Build and check debug APK
         run: |
           chmod +x gradlew
           ./gradlew testDebugUnitTest lintDebug assembleDebug --no-daemon --console=plain \
+            -PversionName="$VERSION_NAME" -PversionCode="$VERSION_CODE" \
             -Pandroid.injected.signing.store.file="$RUNNER_TEMP/ci-debug.keystore" \
             -Pandroid.injected.signing.store.password=android \
             -Pandroid.injected.signing.key.alias=androiddebugkey \
@@ -89,13 +130,22 @@ jobs:
             echo "APK certificate does not match the configured debug key." >&2
             exit 1
           fi
+          APK_PACKAGE=$("$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK_DIR/app-debug.apk" | sed -n '1p')
+          if [[ "$APK_PACKAGE" != *"name='com.quintz.wifi.debug'"* ||
+                "$APK_PACKAGE" != *"versionName='${VERSION_NAME}-debug'"* ||
+                "$APK_PACKAGE" != *"versionCode='$VERSION_CODE'"* ]]; then
+            echo "APK package/version does not match the intended debug build." >&2
+            exit 1
+          fi
+          cp "$APK_DIR/app-debug.apk" "$APK_DIR/$APK_NAME"
           (
             cd "$APK_DIR"
-            sha256sum app-debug.apk > app-debug.apk.sha256
+            sha256sum "$APK_NAME" > "$APK_NAME.sha256"
           )
           {
             echo "Commit: $(git rev-parse HEAD)"
             echo "Workflow run: $GITHUB_RUN_NUMBER (attempt $GITHUB_RUN_ATTEMPT)"
+            echo "App version: ${VERSION_NAME}-debug"
             echo "Android versionCode: $VERSION_CODE"
             echo "Signing certificate SHA-256: $APK_CERT"
           } > "$APK_DIR/debug-build-info.txt"
@@ -109,7 +159,8 @@ jobs:
             echo
             echo "Android versionCode: \`$VERSION_CODE\`"
             echo
-            echo "Download \`app-debug.apk\` below. Future builds signed with the permanent debug key can update it in place."
+            echo "Download \`$APK_NAME\` below. New builds for this version replace the assets in this debug prerelease."
+            echo "Future builds signed with the permanent debug key can update it in place."
             echo "Older debug installations signed with a different key need a one-time uninstall/reinstall, which clears app settings."
             echo "Before uninstalling, restore Auto Roam/unlock any pinned Wi-Fi profile."
             echo
@@ -122,12 +173,13 @@ jobs:
         with:
           name: ${{ steps.version.outputs.artifact_name }}
           path: |
-            app/build/outputs/apk/debug/app-debug.apk
-            app/build/outputs/apk/debug/app-debug.apk.sha256
+            app/build/outputs/apk/debug/${{ steps.version.outputs.apk_name }}
+            app/build/outputs/apk/debug/${{ steps.version.outputs.apk_name }}.sha256
             app/build/outputs/apk/debug/debug-build-info.txt
             app/build/outputs/apk/debug/debug-release-notes.md
           if-no-files-found: error
           retention-days: 14
+          overwrite: true
 
   publish-debug:
     name: Publish verified debug prerelease
@@ -144,7 +196,9 @@ jobs:
 
       - name: Verify downloaded checksum
         working-directory: debug_assets
-        run: sha256sum --check app-debug.apk.sha256
+        env:
+          APK_NAME: ${{ needs.build-debug.outputs.apk_name }}
+        run: sha256sum --check "$APK_NAME.sha256"
 
       - name: Publish debug release
         env:
@@ -152,21 +206,64 @@ jobs:
           TAG_NAME: ${{ needs.build-debug.outputs.tag_name }}
           BUILD_SHA: ${{ needs.build-debug.outputs.commit_sha }}
           RELEASE_TITLE: ${{ needs.build-debug.outputs.release_title }}
+          APK_NAME: ${{ needs.build-debug.outputs.apk_name }}
+          STABLE_TAG: ${{ needs.build-debug.outputs.stable_tag }}
+          VERSION_CODE: ${{ needs.build-debug.outputs.version_code }}
         run: |
           set -euo pipefail
-          EXISTING_TAG_COUNT=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$TAG_NAME" \
-            --jq '[.[] | select(.ref == ("refs/tags/" + env.TAG_NAME))] | length')
-          if [[ "$EXISTING_TAG_COUNT" != 0 ]]; then
-            echo "$TAG_NAME already exists; refusing to replace a published build." >&2
+          if ! [[ "$TAG_NAME" =~ ^debug-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Refusing to modify a tag outside the debug version namespace." >&2
             exit 1
           fi
-          # Upload all assets to a draft first, then publish the complete release.
-          gh release create "$TAG_NAME" --repo "$GITHUB_REPOSITORY" \
+          LATEST_STABLE=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          if [[ "$LATEST_STABLE" != "$STABLE_TAG" ]]; then
+            echo "The stable version changed during the build; run a new debug build." >&2
+            exit 1
+          fi
+          RELEASE_STATE=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+            jq --arg tag "$TAG_NAME" '[.[][] | select(.tag_name == $tag)]')
+          if [[ "$(jq 'length' <<< "$RELEASE_STATE")" == 0 ]]; then
+            gh release create "$TAG_NAME" --repo "$GITHUB_REPOSITORY" \
+              --target "$BUILD_SHA" --title "$RELEASE_TITLE" \
+              --notes-file debug_assets/debug-release-notes.md \
+              --draft --prerelease --latest=false \
+              "debug_assets/$APK_NAME" \
+              "debug_assets/$APK_NAME.sha256" \
+              debug_assets/debug-build-info.txt
+          else
+            if ! jq -e '.[0].prerelease == true and .[0].immutable != true' \
+              <<< "$RELEASE_STATE" >/dev/null; then
+              echo "Existing release must be a mutable debug prerelease." >&2
+              exit 1
+            fi
+            if jq -e '.[0].assets | any(.name == "debug-build-info.txt")' \
+              <<< "$RELEASE_STATE" >/dev/null; then
+              gh release download "$TAG_NAME" --repo "$GITHUB_REPOSITORY" \
+                --pattern debug-build-info.txt --dir "$RUNNER_TEMP/previous-debug" --clobber
+              PREVIOUS_CODE=$(sed -n 's/^Android versionCode: //p' "$RUNNER_TEMP/previous-debug/debug-build-info.txt")
+              if ! [[ "$PREVIOUS_CODE" =~ ^[0-9]+$ ]] || (( VERSION_CODE < PREVIOUS_CODE )); then
+                echo "Refusing to replace a newer debug APK with an older build." >&2
+                exit 1
+              fi
+            fi
+            # Hide the prerelease while replacing assets so a failed upload
+            # leaves a draft, rather than publishing a mismatched APK/checksum.
+            gh release edit "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --draft=true
+            gh release upload "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
+              "debug_assets/$APK_NAME" \
+              "debug_assets/$APK_NAME.sha256" \
+              debug_assets/debug-build-info.txt
+          fi
+          EXISTING_TAG_COUNT=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$TAG_NAME" \
+            --jq '[.[] | select(.ref == ("refs/tags/" + env.TAG_NAME))] | length')
+          if [[ "$EXISTING_TAG_COUNT" == 0 ]]; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$TAG_NAME" -f sha="$BUILD_SHA" >/dev/null
+          else
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG_NAME" \
+              -f sha="$BUILD_SHA" -F force=true >/dev/null
+          fi
+          gh release edit "$TAG_NAME" --repo "$GITHUB_REPOSITORY" \
             --target "$BUILD_SHA" --title "$RELEASE_TITLE" \
             --notes-file debug_assets/debug-release-notes.md \
-            --draft --prerelease --latest=false \
-            debug_assets/app-debug.apk \
-            debug_assets/app-debug.apk.sha256 \
-            debug_assets/debug-build-info.txt
-          gh release edit "$TAG_NAME" --repo "$GITHUB_REPOSITORY" \
             --draft=false --prerelease --latest=false

@@ -27,16 +27,23 @@ builds signed with it. Replacing it breaks normal updates for those installation
 
 ## Versions and installation
 
+The **patch**, **minor**, or **major** choice previews the corresponding increase
+from the latest stable `vMAJOR.MINOR.PATCH` tag, using the same calculation as the
+stable release workflow. For example, stable `2.1.0` plus **patch** yields app
+version `2.1.1-debug`, release tag `debug-v2.1.1`, and APK
+`Quintz-2.1.1-debug.apk`. No GitHub run number appears in these names. The selected
+source must include the latest stable release.
+
 CI uses Android `versionCode = 1000000 + GITHUB_RUN_NUMBER`, keeping codes above
 the previous commit-count values. Each new run increases the code even when an
 older source ref is selected. Rerunning an existing run keeps its version code.
 Keep the workflow's identity and run-number history; recreating it can reset the
 counter and requires reviewing the version-code baseline.
 
-Full Git history is fetched so the existing commit-count version name remains
-accurate. The artifact also contains `app-debug.apk.sha256` and
-`debug-build-info.txt` with the commit, run number, version code, and public
-certificate SHA-256 fingerprint.
+Full Git history is fetched to calculate the upcoming version from stable tags.
+The artifact also contains the matching `Quintz-<version>-debug.apk.sha256` and
+`debug-build-info.txt` with the app version, commit, workflow identity, internal
+version code, and public certificate SHA-256 fingerprint.
 
 Updates require the same signing certificate and a version code at least as high
 as the installed APK. APKs from earlier runs with temporary keys, and APKs signed
@@ -53,19 +60,24 @@ the release app uses package ID `com.quintz.wifi`.
 
 ## Debug releases
 
-Every successful manual build also publishes a prerelease in GitHub's **Releases**
-section, titled `Quintz Debug #<run number>.<attempt>` with tag
-`debug-<run number>-<attempt>`. Download `app-debug.apk` directly from its assets,
-along with the checksum and build details. These releases are explicitly marked
-as prereleases and are never promoted to the latest stable release.
+Every successful manual build creates or updates its version's prerelease in
+GitHub's **Releases** section, titled `Quintz <version>-debug`, tagged
+`debug-v<version>`. Download `Quintz-<version>-debug.apk` directly from its assets,
+along with the matching checksum and build details. These releases are marked
+as prereleases and are never promoted to the latest stable release. The Actions
+artifact is named `Quintz-<version>-debug`; a whole-workflow retry replaces that
+run's existing artifact.
 
-Publication runs only after tests, lint, APK signature verification, and artifact
-upload succeed. A separate publication job verifies the downloaded checksum and
-has the repository write permission needed to create the release. Assets are
-uploaded to a draft before publishing so an incomplete upload stays unpublished.
-The tag targets the exact source commit used for the APK. Rerunning the whole
-workflow gets a new attempt suffix for its tag and Actions artifact, preventing
-collisions with earlier attempts. Rerunning only the publication job keeps the
-original build's identity. Publication refuses to replace an existing tag.
-Debug tags start with `debug-`, so stable release versioning's `v*` selection
-ignores them.
+Publication runs only after tests, lint, APK signature and package/version checks,
+and artifact upload succeed. A separate publication job verifies the downloaded
+checksum and has the repository write permission needed to create or update the
+release. New assets upload to a draft; an existing debug prerelease becomes a
+draft while its assets are replaced. A failed update leaves it unpublished until
+a successful retry. The debug tag moves to the exact commit of the replacement
+APK. Builds serialize, and publication rejects an older internal code, a stable
+release that changed during the build, or an immutable/non-prerelease entry.
+
+Keep repository release immutability disabled for this mutable debug channel.
+Stable tags and releases are never rewritten; the `debug-v` prefix is excluded
+from stable versioning's `v*` selection. Older run-based debug releases remain
+historical entries and are not migrated or removed automatically.
