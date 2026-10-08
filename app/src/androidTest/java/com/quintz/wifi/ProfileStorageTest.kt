@@ -33,12 +33,29 @@ class ProfileStorageTest {
         fun cleanup() { names.forEach { super.deleteSharedPreferences(it) }; noBackupFilesDir.deleteRecursively() }
     }
     private fun preferences(context: Context): Preferences = Preferences::class.java.getDeclaredConstructor(Context::class.java).apply { isAccessible = true }.newInstance(context)
+    @Test fun invalidCredentialCannotReplaceTheEncryptedStoredValue() {
+        val context = IsolatedContext(InstrumentationRegistry.getInstrumentation().targetContext)
+        try {
+            val prefs = preferences(context)
+            assertTrue(prefs.savePassword("test", "OriginalSynthetic42", "2"))
+            for (invalid in listOf("x", "z".repeat(64), "a".repeat(65))) {
+                assertFalse(prefs.savePassword("test", invalid, "2"))
+                assertEquals("OriginalSynthetic42", prefs.getPassword("test"))
+                assertFalse(prefs.commitTransition("test", "02:11:22:33:44:55", "2", invalid,
+                    MacAddressPolicy.DEVICE, WifiTargetMode.PIN_BSSID, true))
+                assertEquals("OriginalSynthetic42", prefs.getPassword("test"))
+                assertNull(prefs.getWifiTargetMode("test"))
+            }
+            assertTrue(prefs.savePassword("test", "x", "4"))
+            assertEquals("x", prefs.getPassword("test"))
+        } finally { context.cleanup() }
+    }
     @Test fun credentialStatusDistinguishesMissingSavedAndUnavailable() {
         val context = IsolatedContext(InstrumentationRegistry.getInstrumentation().targetContext)
         try {
             val prefs = preferences(context)
             assertEquals(SavedCredentialState.NOT_SAVED, prefs.savedCredentialState("test"))
-            assertTrue(prefs.savePassword("test", "synthetic-secret"))
+            assertTrue(prefs.savePassword("test", "synthetic-secret", "2"))
             assertEquals(SavedCredentialState.SAVED, prefs.savedCredentialState("test"))
             assertTrue(prefs.removePassword("test"))
             assertEquals(SavedCredentialState.NOT_SAVED, prefs.savedCredentialState("test"))
@@ -97,7 +114,7 @@ class ProfileStorageTest {
             context.failSecure = true
             val fallback = preferences(context); fallback.isWatchdogEnabled = false
             fallback.setMacPolicy("  special \" network  ", MacAddressPolicy.RANDOMIZED)
-            assertFalse(fallback.savePassword("test", "synthetic-secret"))
+            assertFalse(fallback.savePassword("test", "synthetic-secret", "2"))
             context.failSecure = false
             val recovered = preferences(context)
             assertFalse(recovered.isWatchdogEnabled)

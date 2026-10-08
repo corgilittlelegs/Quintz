@@ -7,8 +7,14 @@ import com.quintz.wifi.model.WifiStatus
 /** Identity captured when the user opens a flow, rather than when a coroutine resumes. */
 data class WifiActionContext(val connected: Boolean, val ssid: String, val security: String, val networkId: Int?) {
     fun matches(status: WifiStatus): Boolean = connected == status.isConnected &&
-        (!connected || ssid.isNotEmpty() && security.isNotEmpty() && networkId != null &&
+        (!connected || WifiParser.normalizeSsid(ssid).isNotEmpty() && security.isNotEmpty() && networkId != null &&
             status.ssid == ssid && status.securityType == security && status.networkId == networkId)
+
+    /** An unknown identity during our own reconnect is not evidence of a different network. */
+    internal fun conflictsAfterApply(status: WifiStatus, targetSsid: String): Boolean {
+        val observedSsid = WifiParser.normalizeSsid(status.ssid)
+        return status.isConnected && observedSsid.isNotEmpty() && observedSsid != ssid && observedSsid != targetSsid
+    }
 
     companion object {
         fun capture(status: WifiStatus) = WifiActionContext(status.isConnected, status.ssid, status.securityType, status.networkId)

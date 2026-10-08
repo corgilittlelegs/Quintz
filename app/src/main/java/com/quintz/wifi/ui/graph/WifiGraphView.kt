@@ -1,5 +1,6 @@
 package com.quintz.wifi.ui.graph
 
+import android.os.SystemClock
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -244,10 +245,9 @@ fun WifiGraphView(
     val frameNow = remember { mutableLongStateOf(state.nowTimestampMillis) }
     LaunchedEffect(state.isPaused, isConnected) {
         if (!state.isPaused && isConnected) {
-            val wallStart = System.currentTimeMillis()
-            val frameStart = withFrameNanos { it }
             while (true) {
-                withFrameNanos { frameNow.longValue = wallStart + (it - frameStart) / 1_000_000L }
+                // Samples use elapsedRealtime too, including time spent asleep between frames.
+                withFrameNanos { frameNow.longValue = SystemClock.elapsedRealtime() }
             }
         }
     }

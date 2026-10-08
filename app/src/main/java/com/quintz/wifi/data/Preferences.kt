@@ -99,8 +99,9 @@ class Preferences private constructor(private val context: Context) {
 
     val isPasswordStorageAvailable: Boolean get() = securePrefs != null && legacyPasswordCleanupSucceeded
 
-    fun savePassword(ssid: String, pass: String): Boolean = runCatching {
-        val saved = isPasswordStorageAvailable && ssid.isNotEmpty() && pass.isNotEmpty() &&
+    fun savePassword(ssid: String, pass: String, securityType: String): Boolean = runCatching {
+        val saved = isPasswordStorageAvailable && ssid.isNotEmpty() &&
+            com.quintz.wifi.core.WifiPasswordPolicy.validationError(pass, securityType) == null &&
             securePrefs?.edit()?.putString("pwd_$ssid", pass)?.commit() == true
         if (saved) {
             prefs.edit().putStringSet("credential_reentry_ssids",
@@ -182,7 +183,7 @@ class Preferences private constructor(private val context: Context) {
     fun commitTransition(ssid: String, bssid: String?, security: String, password: String,
                          policy: MacAddressPolicy, mode: WifiTargetMode?, establishTrust: Boolean): Boolean {
         if (!settingsAvailable) return false
-        if (password.isNotEmpty() && !savePassword(ssid, password)) return false
+        if (password.isNotEmpty() && !savePassword(ssid, password, security)) return false
         val editor = prefs.edit().putString("mac_policy_$ssid", policy.name)
             .remove("pending_mac_policy_$ssid").remove("pending_mac_address_$ssid")
         if (mode != null) {

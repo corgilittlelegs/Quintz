@@ -9,6 +9,27 @@ import org.junit.Test
 
 class WifiParserTest {
 
+    @Test fun connectedFallbackNeverRestoresAnUnknownPlaceholder() {
+        for (placeholder in listOf("<unknown ssid>", "<UNKNOWN SSID>", "<none>", "<NONE>")) {
+            val status = WifiParser.parseStatus("Wifi is connected to \"$placeholder\"\nWifiInfo: SSID: \"$placeholder\", Supplicant state: COMPLETED")
+            assertTrue(status.isConnected)
+            assertEquals("", status.ssid)
+            assertEquals("", WifiParser.parseConnectionIdentity("SSID: \"$placeholder\"").first)
+        }
+    }
+
+    @Test fun staleConnectedTextDoesNotOverrideAnIncompleteSupplicantState() {
+        for (state in listOf("DISCONNECTED", "ASSOCIATING", "ASSOCIATED", "FOUR_WAY_HANDSHAKE", "INACTIVE")) {
+            assertFalse(WifiParser.parseStatus("Wifi is connected to \"Archer\"\nSSID: \"Archer\", Supplicant state: $state").isConnected)
+        }
+    }
+
+    @Test fun legacyConnectedOutputWithoutSupplicantStateStillParses() {
+        val status = WifiParser.parseStatus("Wifi is connected to \"Archer\"")
+        assertTrue(status.isConnected)
+        assertEquals("Archer", status.ssid)
+    }
+
     @Test
     fun testParseLockedBssid_validBssid() {
         val line = "* ID: 17 SSID: \"Archer\" PROVIDER-NAME: null BSSID: 30:de:4b:31:55:30 FQDN: null"

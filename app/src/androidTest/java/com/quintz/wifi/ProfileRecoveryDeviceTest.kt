@@ -7,6 +7,7 @@ import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.quintz.wifi.core.WifiController
+import com.quintz.wifi.core.WifiActionContext
 import com.quintz.wifi.core.profile.*
 import com.quintz.wifi.data.Preferences
 import com.quintz.wifi.data.WifiTargetMode
@@ -93,8 +94,10 @@ class ProfileRecoveryDeviceTest {
             radios.filter { it.band == band }.maxByOrNull { it.rssi } ?: error("Required test band unavailable: $band")
         }
         for (radio in targets) {
-            assertTrue(controller.actionFailureMessage, controller.lockToBssid(ssid, radio.bssid, password!!,
-                macAddressPolicy = policy, requestSource = "device_test_pin_bind"))
+            val actionContext = WifiActionContext.capture(controller.refreshStatus(forceFresh = true))
+            val pinResult = controller.lockToBssidResult(ssid, radio.bssid, password!!,
+                macAddressPolicy = policy, requestSource = "device_test_pin_bind", actionContext = actionContext)
+            assertTrue(pinResult.message, pinResult.verified)
             val pinned = controller.refreshStatus(forceFresh = true)
             assertEquals(radio.bssid.lowercase(), pinned.bssid.lowercase())
             assertEquals(WifiTargetMode.PIN_BSSID, prefs.getWifiTargetMode(ssid))
@@ -102,7 +105,9 @@ class ProfileRecoveryDeviceTest {
             assertTrue("Saved pin was not applied", captured.getString("pin").equals(radio.bssid, true))
             assertFalse(ProfileBackupStore(context).exists())
             Log.i("QuintzRecoveryTest", "PIN_BIND verified band=${radio.band.name} pending=false")
-            assertTrue(controller.actionFailureMessage, controller.unlockToAuto(ssid, requestSource = "device_test_unlock"))
+            val unlockResult = controller.unlockToAutoResult(ssid, requestSource = "device_test_unlock",
+                actionContext = WifiActionContext.capture(pinned))
+            assertTrue(unlockResult.message, unlockResult.verified)
             val automatic = controller.refreshStatus(forceFresh = true)
             assertTrue(automatic.isConnected); assertEquals(ssid, automatic.ssid)
             val unpinned = ProfileAccess.callChecked(context, "lookup", ProfileAccess.identity(ssid, automatic.securityType!!, automatic.networkId))

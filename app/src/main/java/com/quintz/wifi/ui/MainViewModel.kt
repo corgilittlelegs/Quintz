@@ -65,7 +65,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val credentialEditor = CredentialEditor({ controller.refreshStatus(forceFresh = true) },
         { ProfileBackupStore(application).exists() }, object : CredentialStore {
             override val available get() = prefs.isPasswordStorageAvailable
-            override fun save(ssid: String, password: String) = prefs.savePassword(ssid, password)
+            override fun save(ssid: String, password: String, securityType: String) = prefs.savePassword(ssid, password, securityType)
             override fun remove(ssid: String) = prefs.removePassword(ssid)
         })
 

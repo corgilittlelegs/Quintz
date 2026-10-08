@@ -25,6 +25,7 @@ import com.quintz.wifi.model.SavedCredentialState
 import com.quintz.wifi.model.WifiOperationKind
 import com.quintz.wifi.ui.theme.*
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun CliConnectedHeroPanel(
     status: WifiStatus,
@@ -338,10 +339,10 @@ fun CliConnectedHeroPanel(
                     CliDivider(color = CliBorderSubtle)
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    Row(
+                    FlowRow(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
                             text = "ANDROID MAC POLICY",
@@ -385,10 +386,10 @@ fun CliConnectedHeroPanel(
                     CliDivider(color = CliBorderSubtle)
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    Row(
+                    FlowRow(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
                             text = "PASSWORD SAVED IN QUINTZ",

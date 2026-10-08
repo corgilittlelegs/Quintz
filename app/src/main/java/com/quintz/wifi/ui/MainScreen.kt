@@ -56,6 +56,7 @@ import com.quintz.wifi.BuildConfig
 import com.quintz.wifi.R
 import com.quintz.wifi.core.DiagnosticLogger
 import com.quintz.wifi.core.WifiSecurityPolicy
+import com.quintz.wifi.core.WifiPasswordPolicy
 import com.quintz.wifi.model.AccessPointRadio
 import com.quintz.wifi.model.BandType
 import com.quintz.wifi.model.MacAddressPolicy
@@ -990,6 +991,7 @@ fun MainScreen(
     }
     if (showCredentialDialog) {
         var isReplacementVisible by remember { mutableStateOf(false) }
+        val replacementError = WifiPasswordPolicy.validationError(replacementPassword, wifiStatus.securityType)
         fun closeCredentials() {
             replacementPassword = ""
             isReplacementVisible = false
@@ -997,7 +999,7 @@ fun MainScreen(
         }
 
         fun submitReplacement() {
-            if (replacementPassword.isNotBlank() && !isOperating && !wifiStatus.isSteeredOrLocked) {
+            if (replacementError == null && !isOperating && !wifiStatus.isSteeredOrLocked) {
                 val pass = replacementPassword
                 closeCredentials()
                 viewModel.replacePassword(pass)
@@ -1062,6 +1064,10 @@ fun MainScreen(
                         value = replacementPassword,
                         onValueChange = { replacementPassword = it },
                         enabled = !isOperating && !wifiStatus.isSteeredOrLocked,
+                        isError = replacementPassword.isNotEmpty() && replacementError != null,
+                        supportingText = {
+                            if (replacementPassword.isNotEmpty() && replacementError != null) Text(replacementError)
+                        },
                         placeholder = {
                             Text("Enter passphrase :_", style = CliTypography.CodeMono, color = CliTextTertiary)
                         },
@@ -1131,7 +1137,7 @@ fun MainScreen(
                         CliButton(
                             text = "SAVE PASSWORD",
                             variant = CliButtonVariant.Primary,
-                            enabled = !isOperating && !wifiStatus.isSteeredOrLocked && replacementPassword.isNotBlank(),
+                            enabled = !isOperating && !wifiStatus.isSteeredOrLocked && replacementError == null,
                             onClick = { submitReplacement() },
                             modifier = Modifier.weight(1.5f)
                         )
@@ -1157,6 +1163,16 @@ fun MainScreen(
         } ?: (wifiStatus.securityType == "0" || wifiStatus.securityType == "6" || wifiStatus.securityType == "open")
 
         val promptSsid = (preferRadioForPassword ?: targetRadioForPassword)?.ssid?.ifEmpty { wifiStatus.ssid } ?: wifiStatus.ssid
+        val promptRadio = preferRadioForPassword ?: targetRadioForPassword
+        val advertised = promptRadio?.let { WifiSecurityPolicy.fromFlags(it.flags) }
+        val promptSecurity = when {
+            advertised == null -> wifiStatus.securityType
+            advertised.supportsSae && advertised.supportsPsk -> wifiStatus.securityType.takeIf { it in setOf("2", "4") } ?: "4"
+            advertised.supportsSae -> "4"
+            advertised.supportsPsk -> "2"
+            else -> ""
+        }
+        val passphraseError = if (isTargetOpen) null else WifiPasswordPolicy.validationError(passwordInput, promptSecurity)
 
         val promptDescription = if (isTargetOpen) {
             "This network is Open / Unsecured. No passphrase required."
@@ -1174,7 +1190,7 @@ fun MainScreen(
         }
 
         fun submitPassphrase() {
-            if (isTargetOpen || passwordInput.isNotBlank()) {
+            if (passphraseError == null) {
                 val source = if (preferRadioForPassword != null) "main_screen_password_dialog_prefer_5ghz"
                     else "main_screen_password_dialog_bind_lock"
                 val correlationId = DiagnosticLogger.newCorrelationId()
@@ -1251,6 +1267,10 @@ fun MainScreen(
                         OutlinedTextField(
                             value = passwordInput,
                             onValueChange = { passwordInput = it },
+                            isError = passwordInput.isNotEmpty() && passphraseError != null,
+                            supportingText = {
+                                if (passwordInput.isNotEmpty() && passphraseError != null) Text(passphraseError)
+                            },
                             placeholder = {
                                 Text("Enter passphrase :_", style = CliTypography.CodeMono, color = CliTextTertiary)
                             },
@@ -1306,6 +1326,7 @@ fun MainScreen(
                         CliButton(
                             text = promptButtonText,
                             variant = CliButtonVariant.Primary,
+                            enabled = passphraseError == null,
                             onClick = { submitPassphrase() },
                             modifier = Modifier.weight(1.5f)
                         )

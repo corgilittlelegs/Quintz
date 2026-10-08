@@ -6,7 +6,7 @@ import com.quintz.wifi.model.WifiStatus
 
 internal interface CredentialStore {
     val available: Boolean
-    fun save(ssid: String, password: String): Boolean
+    fun save(ssid: String, password: String, securityType: String): Boolean
     fun remove(ssid: String): Boolean
 }
 
@@ -24,9 +24,12 @@ internal class CredentialEditor(private val status: suspend () -> WifiStatus,
                 return WifiActionResult(TransitionResult.Unsupported)
             if (current.isSteeredOrLocked) return WifiActionResult(TransitionResult.Failed,
                 detail = "Unlock to auto-roam before changing saved credentials.")
-            if (!store.available || password != null && password.isEmpty()) return WifiActionResult(TransitionResult.StorageFailed,
-                detail = "Secure password storage is unavailable or the password is empty. Retry storage or enter the password again.")
-            val saved = if (password == null) store.remove(target.ssid) else store.save(target.ssid, password)
+            if (password != null) WifiPasswordPolicy.validationError(password, current.securityType)?.let {
+                return WifiActionResult(TransitionResult.Failed, detail = it)
+            }
+            if (!store.available) return WifiActionResult(TransitionResult.StorageFailed,
+                detail = "Secure password storage is unavailable. Retry secure storage.")
+            val saved = if (password == null) store.remove(target.ssid) else store.save(target.ssid, password, current.securityType)
             return WifiActionResult(if (saved) TransitionResult.Verified else TransitionResult.StorageFailed,
                 detail = if (saved) {
                     if (password == null) "Password removed from Quintz. Android's saved network was kept." else "Password saved in Quintz."

@@ -17,12 +17,14 @@ object WifiParser {
     private val NET_ID_REGEX = Regex("""Net ID:\s*(\d+)""")
     private val SCAN_FLAGS_SUFFIX_REGEX = Regex("""(?:^|\s+)((?:\[[^\]]+\])+)$""")
 
+    internal fun normalizeSsid(ssid: String): String = ssid.takeUnless {
+        it.equals("<unknown ssid>", ignoreCase = true) || it.equals("<none>", ignoreCase = true)
+    }.orEmpty()
+
     /** Reads identity fields from dumpsys output even when it omits connection-state markers. */
     fun parseConnectionIdentity(output: String): Pair<String, String> {
         val rawSsid = SSID_REGEX.find(output)?.groupValues?.get(1).orEmpty()
-        val ssid = rawSsid.takeUnless {
-            it.equals("<unknown ssid>", ignoreCase = true) || it.equals("<none>", ignoreCase = true)
-        }.orEmpty()
+        val ssid = normalizeSsid(rawSsid)
         if (rawSsid.contains('\\') || Regex("SSID:\\s*\"[^\"]*\"[^,\\n]*\"").containsMatchIn(output)) return "" to ""
         val bssid = BSSID_REGEX.find(output)?.groupValues?.get(1).orEmpty()
         return ssid to bssid
@@ -30,20 +32,20 @@ object WifiParser {
 
     fun parseStatus(statusOutput: String, lockDumpLine: String? = null): WifiStatus {
         val hasConnectedString = statusOutput.contains("Wifi is connected to", ignoreCase = true)
-        val hasSupplicantCompleted = statusOutput.contains("Supplicant state: COMPLETED", ignoreCase = true) &&
-                !statusOutput.contains("SSID: <unknown ssid>", ignoreCase = true) &&
-                !statusOutput.contains("SSID: <none>", ignoreCase = true)
+        val supplicantState = Regex("""Supplicant state:\s*(\w+)""", RegexOption.IGNORE_CASE)
+            .find(statusOutput)?.groupValues?.get(1)
+        val hasSupplicantCompleted = supplicantState.equals("COMPLETED", ignoreCase = true)
 
-        if (!hasConnectedString && !hasSupplicantCompleted) {
+        if (supplicantState != null && !hasSupplicantCompleted || !hasConnectedString && !hasSupplicantCompleted) {
             return WifiStatus(isConnected = false)
         }
 
         var ssid = SSID_REGEX.find(statusOutput)?.groupValues?.get(1).orEmpty()
-        if (ssid == "<unknown ssid>" || ssid == "<none>") ssid = ""
+        ssid = normalizeSsid(ssid)
 
         if (ssid.isEmpty()) {
             val connectedToMatch = Regex("""Wifi is connected to\s+"?([^"\n]+)"?""", RegexOption.IGNORE_CASE).find(statusOutput)
-            ssid = connectedToMatch?.groupValues?.get(1)?.trim('"')?.trim().orEmpty()
+            ssid = normalizeSsid(connectedToMatch?.groupValues?.get(1)?.trim('"')?.trim().orEmpty())
         }
 
         val bssid = BSSID_REGEX.find(statusOutput)?.groupValues?.get(1).orEmpty()
