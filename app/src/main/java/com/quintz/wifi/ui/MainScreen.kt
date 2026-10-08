@@ -615,11 +615,13 @@ fun MainScreen(
                                     CliPanel(
                                         containerColor = CliSurface,
                                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 14.dp),
-                                        modifier = Modifier.fillMaxSize()
+                                        modifier = Modifier.fillMaxWidth()
                                     ) {
                                         if (filteredRadios.isEmpty()) {
                                             Box(
-                                                modifier = Modifier.fillMaxSize(),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(vertical = 24.dp),
                                                 contentAlignment = Alignment.Center
                                             ) {
                                                 Text(
@@ -637,7 +639,7 @@ fun MainScreen(
                                                 status = wifiStatus,
                                                 operating = isOperating,
                                                 access = shizukuState.isPermissionGranted,
-                                                modifier = Modifier.fillMaxSize(),
+                                                modifier = Modifier.fillMaxWidth(),
                                                 onBind = { requestRadioBind(it, "main_screen_wide_radio_lock") },
                                                 onUnpin = { viewModel.unlockToAuto("main_screen_wide_radio_unpin") }
                                             )
@@ -787,7 +789,7 @@ fun MainScreen(
 
                             PhoneTab.SCANNER -> {
                                 CliPanel(
-                                    modifier = Modifier.fillMaxSize(),
+                                    modifier = Modifier.fillMaxWidth(),
                                     containerColor = CliSurface,
                                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 14.dp)
                                 ) {
@@ -839,7 +841,7 @@ fun MainScreen(
                                         Box(
                                             modifier = Modifier
                                                 .fillMaxWidth()
-                                                .weight(1f),
+                                                .padding(vertical = 24.dp),
                                             contentAlignment = Alignment.Center
                                         ) {
                                             Text(
@@ -857,7 +859,7 @@ fun MainScreen(
                                             status = wifiStatus,
                                             operating = isOperating,
                                             access = shizukuState.isPermissionGranted,
-                                            modifier = Modifier.weight(1f),
+                                            modifier = Modifier.fillMaxWidth(),
                                             onBind = { requestRadioBind(it, "main_screen_scanner_radio_lock") },
                                             onUnpin = { viewModel.unlockToAuto("main_screen_scanner_radio_unpin") }
                                         )

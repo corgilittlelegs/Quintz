@@ -30,12 +30,12 @@ class MacPolicyUiTest {
                 )
             }
         }
-        compose.onNodeWithText("DEVICE MAC ▾").performScrollTo().performClick()
+        compose.onNodeWithText("DEVICE MAC ⇄").performScrollTo().performClick()
         compose.runOnIdle { assertEquals("Test", opened) }
         compose.onNodeWithText("Quintz preference: Not set").assertExists()
         compose.onNodeWithText("No · Separate from Android's saved network").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("ADD PASSWORD ↗").assertExists()
-        compose.onNodeWithText("UNKNOWN ▾").assertDoesNotExist()
+        compose.onNodeWithText("UNKNOWN ⇄").assertDoesNotExist()
     }
     @Test fun userChoosesAnExplicitPolicy() {
         var selected: MacAddressPolicy? = null
