@@ -25,9 +25,12 @@ import kotlinx.coroutines.*
 import com.quintz.wifi.core.profile.*
 import android.os.Bundle
 
-class WifiController(private val context: Context) {
+private class WifiContextChanged : Exception()
 
-    private val prefs = Preferences.get(context)
+class WifiController(private val context: Context,
+    private val prefs: Preferences = Preferences.get(context),
+    private val clock: MonotonicClock = AndroidMonotonicClock,
+    private val profiles: ProfileGateway = ProfileAccess) {
     @Volatile var lastTransitionResult: TransitionResult = TransitionResult.Failed
         private set
     @Volatile var lastRecoveryFailure: RecoveryFailure = RecoveryFailure.RESTORE_FAILED
@@ -54,6 +57,8 @@ class WifiController(private val context: Context) {
 
     private val _radios = MutableStateFlow<List<AccessPointRadio>>(emptyList())
     val radios: StateFlow<List<AccessPointRadio>> = _radios.asStateFlow()
+    private val _scanState = MutableStateFlow(ScanState())
+    val scanState: StateFlow<ScanState> = _scanState.asStateFlow()
 
     val isOperating: StateFlow<Boolean> = WifiOperationCoordinator.isOperating
     val currentOperation: StateFlow<WifiOperationKind> = WifiOperationCoordinator.currentOperation
@@ -69,7 +74,10 @@ class WifiController(private val context: Context) {
         _isScanQueued.value = queuedScanCount > 0
     }
 
-    fun invalidateRadios() { _radios.value = emptyList(); lastScanSucceeded = false }
+    fun invalidateRadios() {
+        _radios.value = emptyList(); lastScanSucceeded = false
+        _scanState.value = ScanState(ScanPhase.ACCESS_UNAVAILABLE)
+    }
 
     fun publishConnectedObservation(observation: WifiStatus) {
         val previous = _status.value
@@ -86,20 +94,24 @@ class WifiController(private val context: Context) {
         try {
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
                 ?: return WifiStatus()
-            val activeNetwork = cm.activeNetwork ?: return WifiStatus()
-            val caps = cm.getNetworkCapabilities(activeNetwork) ?: return WifiStatus()
-            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-                return WifiStatus()
-            }
-
-            val linkProps = cm.getLinkProperties(activeNetwork)
-            val ipAddress = linkProps?.linkAddresses
-                ?.firstOrNull { it.address is java.net.Inet4Address }
-                ?.address?.hostAddress.orEmpty()
-
             val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
             @Suppress("DEPRECATION")
             val wmInfo = wm?.connectionInfo
+            // A cellular default or VPN must not supply the Wi-Fi link's IP configuration.
+            val candidates = cm.allNetworks.mapNotNull { network ->
+                cm.getNetworkCapabilities(network)?.takeIf {
+                    it.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) && !it.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+                }?.let { network to it }
+            }
+            val selected = selectWifiNetwork(candidates) { (_, candidateCaps) ->
+                val info = candidateCaps.transportInfo as? WifiInfo
+                info != null && wmInfo?.networkId?.takeIf { it >= 0 } == info.networkId &&
+                    !info.bssid.isNullOrEmpty() && info.bssid != "02:00:00:00:00:00" && info.bssid.equals(wmInfo.bssid, true)
+            } ?: return WifiStatus()
+            val (wifiNetwork, caps) = selected
+            val addresses = cm.getLinkProperties(wifiNetwork)?.linkAddresses.orEmpty()
+                .map { it.address }.filter(::isUsableWifiAddress)
+                .sortedBy { it !is java.net.Inet4Address }.mapNotNull { it.hostAddress }
             val capsWifiInfo = caps.transportInfo as? WifiInfo
             // WifiManager can retain permitted identity fields which transportInfo redacts.
             val wifiInfo = wmInfo?.takeIf {
@@ -142,7 +154,9 @@ class WifiController(private val context: Context) {
                 rssi = signalDbm,
                 linkSpeedMbps = speed,
                 standard = standard,
-                ipAddress = ipAddress,
+                ipAddress = addresses.firstOrNull().orEmpty(),
+                ipAddresses = addresses,
+                internetValidated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
                 networkId = wifiInfo?.networkId?.takeIf { it >= 0 },
                 observedMacAddress = wifiInfo?.macAddress?.takeIf { ssid.isNotEmpty() && bssid.isNotEmpty() && it != "02:00:00:00:00:00" && it != "00:00:00:00:00:00" },
                 nativeIdentityLimited = ssid.isEmpty() || bssid.isEmpty()
@@ -156,7 +170,7 @@ class WifiController(private val context: Context) {
         val (status, coalesced) = WifiStatusCoordinator.refresh(forceFresh) { refreshStatusDirect(forceFresh) }
         _status.value = status
         if (coalesced) {
-            DiagnosticLogger.log("WIFI_STATUS", "result=coalesced ageMs=${(System.currentTimeMillis() - status.observedAtMillis).coerceAtLeast(0L)}")
+            DiagnosticLogger.log("WIFI_STATUS", "result=coalesced ageMs=${(clock.nowMillis() - status.observedAtMillis).coerceAtLeast(0L)}")
         }
         status
     }
@@ -165,7 +179,10 @@ class WifiController(private val context: Context) {
         val nativeStatus = getNativeWifiStatus()
 
         if (!ShizukuManager.isReady()) {
-            val observed = nativeStatus.copy(observedAtMillis = System.currentTimeMillis())
+            val mode = prefs.getWifiTargetMode(nativeStatus.ssid)
+            val observed = nativeStatus.copy(observedAtMillis = clock.nowMillis(),
+                isPreferenceRequested = mode == WifiTargetMode.PREFER_5_GHZ,
+                requestedPinnedBssid = prefs.getPinnedBssid(nativeStatus.ssid).takeIf { mode == WifiTargetMode.PIN_BSSID })
             _status.value = observed
             return@withContext observed
         }
@@ -173,7 +190,7 @@ class WifiController(private val context: Context) {
         // 1. Primary shell query
         val statusResult = ShizukuManager.exec("cmd wifi status")
         var status = WifiParser.parseStatus(statusResult.stdout)
-        val structured = ProfileAccess.call(context, "status", Bundle())
+        val structured = profiles.call(context, "status", Bundle())
         @Suppress("DEPRECATION") val info = structured?.getParcelable<WifiInfo>("info")
         if (info != null && info.supplicantState == android.net.wifi.SupplicantState.COMPLETED &&
             info.ssid !in setOf("<unknown ssid>", "<none>", "") && !info.bssid.isNullOrEmpty() && info.bssid != "02:00:00:00:00:00") {
@@ -229,7 +246,7 @@ class WifiController(private val context: Context) {
                 nativeIdentityLimited = resolvedSsid.isEmpty() || resolvedBssid.isEmpty()
             )
             if (status.ipAddress.isEmpty() && nativeStatus.ipAddress.isNotEmpty() && status.ssid == nativeStatus.ssid && status.bssid.equals(nativeStatus.bssid, true)) {
-                status = status.copy(ipAddress = nativeStatus.ipAddress)
+                status = status.copy(ipAddress = nativeStatus.ipAddress, ipAddresses = nativeStatus.ipAddresses, internetValidated = nativeStatus.internetValidated)
             }
             if (status.frequency == 0 && nativeStatus.frequency != 0) {
                 status = status.copy(frequency = nativeStatus.frequency, band = BandType.fromFrequency(nativeStatus.frequency))
@@ -250,7 +267,7 @@ class WifiController(private val context: Context) {
             val on5G = status.band == BandType.BAND_5_GHZ || status.band == BandType.BAND_6_GHZ
             status.copy(
                 isLockedToBssid = pin != null && pin.equals(status.bssid, true),
-                profileObservedAtMillis = if (inspection != null) System.currentTimeMillis() else 0L,
+                profileObservedAtMillis = if (inspection != null) clock.nowMillis() else 0L,
                 lockedBssid = pin, profileInspectionKnown = inspection != null,
                 isPreferenceRequested = preferred,
                 requestedPinnedBssid = if (mode == WifiTargetMode.PIN_BSSID) prefs.getPinnedBssid(status.ssid) else null,
@@ -259,7 +276,14 @@ class WifiController(private val context: Context) {
             )
         } else status
 
-        val observedStatus = finalStatus.copy(observedAtMillis = System.currentTimeMillis(), identityObservedAtMillis = System.currentTimeMillis(),
+        val matchedLink = nativeStatus.isConnected && finalStatus.isConnected &&
+            (nativeStatus.ssid == finalStatus.ssid && nativeStatus.bssid.equals(finalStatus.bssid, true) ||
+                nativeStatus.nativeIdentityLimited && nativeStatus.networkId == finalStatus.networkId && nativeStatus.frequency == finalStatus.frequency)
+        val observedStatus = finalStatus.copy(
+            ipAddresses = if (matchedLink) nativeStatus.ipAddresses else finalStatus.ipAddresses,
+            ipAddress = if (matchedLink && nativeStatus.ipAddresses.isNotEmpty()) nativeStatus.ipAddresses.first() else finalStatus.ipAddress,
+            internetValidated = matchedLink && nativeStatus.internetValidated,
+            observedAtMillis = clock.nowMillis(), identityObservedAtMillis = clock.nowMillis(),
             isMacPolicyPending = prefs.isMacPolicyPending(finalStatus.ssid, finalStatus.configuredMacPolicy, finalStatus.observedMacAddress))
         val oldStatus = _status.value
         _status.value = observedStatus
@@ -302,16 +326,18 @@ class WifiController(private val context: Context) {
         freshForBssid: String? = null
     ): List<AccessPointRadio> = withContext(Dispatchers.IO) {
         if (!ShizukuManager.isReady()) {
-            _radios.value = emptyList(); lastScanSucceeded = false
+            invalidateRadios()
             return@withContext emptyList()
         }
 
         val requestedAtElapsed = SystemClock.elapsedRealtime()
         var lockAcquired = false
         changeQueuedScans(1)
+        _scanState.value = ScanState(ScanPhase.QUEUED)
         try {
             val (batch, coalesced) = withTimeout(12_000L) { WifiScanCoordinator.scan(freshForSsid, freshForBssid, onLockAcquired = {
                 lockAcquired = true
+                _scanState.value = ScanState(ScanPhase.SCANNING)
                 changeQueuedScans(-1)
             }) { previousAges ->
                 scanRadiosDirect(correlationId, freshForSsid, freshForBssid, previousAges)
@@ -323,6 +349,8 @@ class WifiController(private val context: Context) {
             _radios.value = radios
             lastScanAttemptTimestamp = batch.completedAtMillis
             lastScanSucceeded = batch.succeeded
+            _scanState.value = if (batch.succeeded) ScanState(ScanPhase.READY)
+                else ScanState(ScanPhase.FAILED, "Android did not provide a fresh scan. Refresh to try again.")
             lastScanDurationMillis = batch.durationMillis
             lastScanWasCoalesced = coalesced
             if (batch.succeeded) lastScanCompletedTimestamp = batch.completedAtMillis
@@ -335,11 +363,21 @@ class WifiController(private val context: Context) {
             radios
         } catch (e: TimeoutCancellationException) {
             lastScanSucceeded = false
-            lastScanAttemptTimestamp = System.currentTimeMillis()
+            lastScanAttemptTimestamp = clock.nowMillis()
             lastScanDurationMillis = SystemClock.elapsedRealtime() - requestedAtElapsed
             lastScanWasCoalesced = false
+            _scanState.value = ScanState(ScanPhase.FAILED, "Scan timed out. Refresh to try again.")
             // Previous rows are no longer actionable after an incomplete refresh.
             _radios.value = emptyList()
+            emptyList()
+        } catch (failure: CancellationException) {
+            _scanState.value = ScanState(ScanPhase.IDLE)
+            throw failure
+        } catch (_: Exception) {
+            lastScanSucceeded = false
+            lastScanAttemptTimestamp = clock.nowMillis()
+            _radios.value = emptyList()
+            _scanState.value = ScanState(ScanPhase.FAILED, "Scan could not be read. Check Shizuku and retry.")
             emptyList()
         } finally {
             if (!lockAcquired) changeQueuedScans(-1)
@@ -368,7 +406,7 @@ class WifiController(private val context: Context) {
                     "WIFI_SCAN",
                     "id=${correlationId ?: "none"} result=failed phase=start_scan durationMs=${SystemClock.elapsedRealtime() - scanStartedElapsedMs} exitCode=${scanStart.exitCode} stderr=${scanStart.stderr.take(160)}"
                 )
-                return@withContext WifiScanBatch(emptyList(), System.currentTimeMillis(), SystemClock.elapsedRealtime(), false, SystemClock.elapsedRealtime() - scanStartedElapsedMs)
+                return@withContext WifiScanBatch(emptyList(), clock.nowMillis(), SystemClock.elapsedRealtime(), false, SystemClock.elapsedRealtime() - scanStartedElapsedMs)
             }
 
             val requiresFreshTarget = freshForSsid != null || freshForBssid != null
@@ -385,7 +423,7 @@ class WifiController(private val context: Context) {
                         completionReported = true
                     }
                 }
-                list = readStructuredRadios() ?: return@withContext WifiScanBatch(emptyList(), System.currentTimeMillis(), SystemClock.elapsedRealtime(), false, SystemClock.elapsedRealtime() - scanStartedElapsedMs)
+                list = readStructuredRadios() ?: return@withContext WifiScanBatch(emptyList(), clock.nowMillis(), SystemClock.elapsedRealtime(), false, SystemClock.elapsedRealtime() - scanStartedElapsedMs)
                 // A completion notification permits an empty successful scan. Targeted steering
                 // still requires a new observation of the requested radio, not just a broadcast.
                 refreshObserved = completionReported || hasNewScanObservation(list.map { it.copy(observedAtMillis = it.observedAtElapsedMillis) }, baseline, scanStartedAtMs)
@@ -416,7 +454,7 @@ class WifiController(private val context: Context) {
                         (it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ)
                 }
             } else list
-            val completedAtMs = System.currentTimeMillis()
+            val completedAtMs = clock.nowMillis()
             val durationMillis = SystemClock.elapsedRealtime() - scanStartedElapsedMs
             val succeeded = if (requiresFreshTarget) targetRefreshObserved else refreshObserved
             DiagnosticLogger.log(
@@ -431,9 +469,9 @@ class WifiController(private val context: Context) {
     }
 
     private suspend fun readStructuredRadios(): List<AccessPointRadio>? {
-        val result = ProfileAccess.call(context, "scan", Bundle()) ?: return null
+        val result = profiles.call(context, "scan", Bundle()) ?: return null
         @Suppress("DEPRECATION") val scans = result.getParcelableArrayList<ScanResult>("radios") ?: return null
-        val now = SystemClock.elapsedRealtime(); val wall = System.currentTimeMillis()
+        val now = SystemClock.elapsedRealtime()
         return scans.mapNotNull { scan ->
             val ageMicros = SystemClock.elapsedRealtimeNanos() / 1000L - scan.timestamp
             if (ageMicros < 0L) return@mapNotNull null
@@ -445,7 +483,7 @@ class WifiController(private val context: Context) {
             else AccessPointRadio(scan.BSSID, name, scan.frequency, BandType.fromFrequency(scan.frequency),
                 AccessPointRadio.frequencyToChannel(scan.frequency), scan.level, scan.capabilities.orEmpty(),
                 scan.BSSID.equals(_status.value.bssid, true), (age + 999L) / 1000L,
-                wall - age, observed)
+                observed, observed)
         }.groupBy { it.bssid.lowercase() }.map { (_, values) -> values.sortedWith(compareByDescending<AccessPointRadio> { it.observedAtElapsedMillis }.thenByDescending { it.rssi }).first() }
             .sortedWith(compareByDescending<AccessPointRadio> { it.isCurrent }.thenByDescending { it.ssid == _status.value.ssid }
                 .thenByDescending { it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ }.thenByDescending { it.rssi })
@@ -457,57 +495,79 @@ class WifiController(private val context: Context) {
         unpinProfileForRoaming: Boolean = false, deferIfHealthy24Ghz: Boolean = false,
         allowSwitchFromHealthy24Ghz: Boolean = false, requestSource: String = "unspecified",
         correlationId: String = DiagnosticLogger.newCorrelationId()
-    ): Boolean = lockToBssidInternal(ssid, bssid, passphrase, securityType, macAddressPolicy,
+    ): Boolean = lockToBssidResult(ssid, bssid, passphrase, securityType, macAddressPolicy,
+        unpinProfileForRoaming, deferIfHealthy24Ghz, allowSwitchFromHealthy24Ghz, requestSource, correlationId).verified
+
+    suspend fun lockToBssidResult(
+        ssid: String, bssid: String, passphrase: String, securityType: String = "",
+        macAddressPolicy: MacAddressPolicy? = null, unpinProfileForRoaming: Boolean = false,
+        deferIfHealthy24Ghz: Boolean = false, allowSwitchFromHealthy24Ghz: Boolean = false,
+        requestSource: String = "unspecified", correlationId: String = DiagnosticLogger.newCorrelationId(),
+        actionContext: WifiActionContext? = null
+    ): WifiActionResult = lockToBssidInternal(ssid, bssid, passphrase, securityType, macAddressPolicy,
         unpinProfileForRoaming, deferIfHealthy24Ghz, allowSwitchFromHealthy24Ghz,
-        requestSource, correlationId, false)
+        requestSource, correlationId, false, actionContext)
 
     private suspend fun lockToBssidInternal(
         ssid: String, bssid: String, passphrase: String, securityType: String,
         macAddressPolicy: com.quintz.wifi.model.MacAddressPolicy?, unpinProfileForRoaming: Boolean,
         deferIfHealthy24Ghz: Boolean, allowSwitchFromHealthy24Ghz: Boolean,
-        requestSource: String, correlationId: String, operationLockHeld: Boolean
-    ): Boolean = transition(ssid, bssid, passphrase, securityType, macAddressPolicy,
+        requestSource: String, correlationId: String, operationLockHeld: Boolean, actionContext: WifiActionContext? = null
+    ): WifiActionResult = transition(ssid, bssid, passphrase, securityType, macAddressPolicy,
         if (unpinProfileForRoaming) WifiTargetMode.PREFER_5_GHZ else WifiTargetMode.PIN_BSSID,
         preserveMode = false, reconnect = true, operationLockHeld = operationLockHeld,
         automated = deferIfHealthy24Ghz || requestSource.startsWith("watchdog"), holdHealthy = deferIfHealthy24Ghz && !allowSwitchFromHealthy24Ghz,
-        requestSource = requestSource, correlationId = correlationId)
+        requestSource = requestSource, correlationId = correlationId, actionContext = actionContext)
 
     suspend fun unlockToAuto(
         ssid: String, passphrase: String? = null, securityType: String = "",
-        macAddressPolicy: com.quintz.wifi.model.MacAddressPolicy? = null,
-        isAutomatedFallback: Boolean = false, preserveTargetMode: Boolean = false,
-        requestSource: String = "unspecified", correlationId: String = DiagnosticLogger.newCorrelationId()
-    ): Boolean = transition(ssid, null, passphrase ?: prefs.getPassword(ssid).orEmpty(), securityType,
-        macAddressPolicy, WifiTargetMode.AUTO, preserveTargetMode || isAutomatedFallback,
-        reconnect = !isAutomatedFallback || !status.value.isConnected,
+        macAddressPolicy: MacAddressPolicy? = null, isAutomatedFallback: Boolean = false,
+        preserveTargetMode: Boolean = false, requestSource: String = "unspecified",
+        correlationId: String = DiagnosticLogger.newCorrelationId()
+    ): Boolean = unlockToAutoResult(ssid, securityType, isAutomatedFallback,
+        preserveTargetMode, requestSource, correlationId).verified
+
+    /** Only the saved BSSID and app steering intent change; credentials and MAC are retained. */
+    suspend fun unlockToAutoResult(
+        ssid: String, securityType: String = "", isAutomatedFallback: Boolean = false,
+        preserveTargetMode: Boolean = false, requestSource: String = "unspecified",
+        correlationId: String = DiagnosticLogger.newCorrelationId(), actionContext: WifiActionContext? = null
+    ): WifiActionResult = transition(ssid, null, "", securityType, null, WifiTargetMode.AUTO,
+        preserveTargetMode || isAutomatedFallback, reconnect = isAutomatedFallback && !status.value.isConnected,
         operationLockHeld = false, automated = isAutomatedFallback, holdHealthy = false,
-        requestSource = requestSource, correlationId = correlationId)
+        requestSource = requestSource, correlationId = correlationId, pinOnly = true, actionContext = actionContext)
 
     private suspend fun profile(ssid: String, security: String, id: Int? = null): Bundle? =
-        ProfileAccess.call(context, "inspect", ProfileAccess.identity(ssid, security, id))
+        profiles.call(context, "inspect", ProfileAccess.identity(ssid, security, id))
 
     /** Existing-profile operation: never supplies a password, clears a pin, or chooses another AP. */
-    suspend fun changeMacPolicy(ssid: String, policy: MacAddressPolicy): MacPolicyChangeResult = withContext(Dispatchers.IO) {
+    suspend fun changeMacPolicy(ssid: String, policy: MacAddressPolicy): MacPolicyChangeResult =
+        changeMacPolicyResult(ssid, policy).outcome
+
+    suspend fun changeMacPolicyResult(ssid: String, policy: MacAddressPolicy,
+        actionContext: WifiActionContext? = null): MacPolicyActionResult = withContext(Dispatchers.IO) {
         if (!WifiOperationCoordinator.tryBegin(WifiOperationKind.CHANGE_MAC_POLICY)) {
             lastTransitionResult = TransitionResult.Busy
-            return@withContext MacPolicyChangeResult.FAILED
+            return@withContext MacPolicyActionResult(MacPolicyChangeResult.FAILED, WifiActionResult(TransitionResult.Busy))
         }
         val backup = ProfileBackupStore(context)
         var result: TransitionResult = TransitionResult.Failed
         var outcome = MacPolicyChangeResult.FAILED
+        var completion = WifiActionResult(result)
         var transaction: ProfileTransaction<Bundle>? = null
         lastPasswordStorageFailure = false
         lastRecoveryFailure = RecoveryFailure.RESTORE_FAILED
         try {
             result = withTimeout(60_000L) {
-                if (!ShizukuManager.isReady()) return@withTimeout TransitionResult.Unsupported
+                if (!ShizukuManager.isReady()) return@withTimeout TransitionResult.AccessUnavailable
                 if (!recoverPendingProfile(backup, operationLockHeld = true)) return@withTimeout TransitionResult.RecoveryPending
                 val initial = refreshStatus(forceFresh = true)
+                if (actionContext != null && !actionContext.matches(initial)) return@withTimeout TransitionResult.NetworkChanged
                 if (!initial.isConnected || initial.ssid != ssid || initial.networkId == null || !initial.profileInspectionKnown)
                     return@withTimeout TransitionResult.Unsupported
                 val sec = initial.securityType
                 val identity = ProfileAccess.identity(ssid, sec, initial.networkId)
-                val existing = ProfileAccess.callChecked(context, "lookup", identity)
+                val existing = profiles.callChecked(context, "lookup", identity)
                 if (existing.getBoolean("absent")) return@withTimeout TransitionResult.Unsupported
                 val configured = when (existing.getInt("mac", -1)) {
                     0 -> MacAddressPolicy.DEVICE
@@ -527,9 +587,9 @@ class WifiController(private val context: Context) {
                     return@withTimeout TransitionResult.Unsupported
                 if (mode == WifiTargetMode.PREFER_5_GHZ && !pin.isNullOrBlank())
                     return@withTimeout TransitionResult.Unsupported
-                val original = ProfileAccess.callChecked(context, "preview", Bundle(existing).apply { putBoolean("macOnly", true) })
+                val original = profiles.callChecked(context, "preview", Bundle(existing).apply { putBoolean("macOnly", true) })
                 check(sameProfile(original, existing))
-                val target = ProfileAccess.callChecked(context, "preview", Bundle(existing).apply {
+                val target = profiles.callChecked(context, "preview", Bundle(existing).apply {
                     putBoolean("macOnly", true)
                     putInt("newMac", if (policy == MacAddressPolicy.DEVICE) 0 else 1)
                 })
@@ -540,7 +600,7 @@ class WifiController(private val context: Context) {
                 target.putString("operation", "mac_policy")
                 val backend = transactionBackend(backup, identity, ssid, original.getString("pin"), sec,
                     policy, "", null, false, plan == MacPolicyChangePlan.RECONNECT, false,
-                    macOnly = true, requestedMode = mode)
+                    macOnly = true, requestedMode = mode, actionContext = actionContext ?: WifiActionContext.capture(initial))
                 // Preserve the MAC identity metadata used to verify rollback after a reconnect.
                 val store = object : RecoveryStore<Bundle> {
                     private val delegate = bundleStore(backup)
@@ -556,6 +616,7 @@ class WifiController(private val context: Context) {
             }
         } catch (e: CancellationException) {
             if (e !is TimeoutCancellationException) throw e
+        } catch (_: WifiContextChanged) { result = TransitionResult.NetworkChanged
         } catch (e: ProfileRecoveryException) {
             lastRecoveryFailure = e.reason
             result = if (backup.exists()) TransitionResult.RecoveryPending else TransitionResult.Unsupported
@@ -570,9 +631,10 @@ class WifiController(private val context: Context) {
                 if (!restored) result = TransitionResult.RecoveryPending
             }
             lastTransitionResult = result
+            completion = WifiActionResult(result, lastRecoveryFailure.takeIf { result == TransitionResult.RecoveryPending })
             WifiOperationCoordinator.end()
         }
-        if (result == TransitionResult.Verified) outcome else MacPolicyChangeResult.FAILED
+        MacPolicyActionResult(if (result == TransitionResult.Verified) outcome else MacPolicyChangeResult.FAILED, completion)
     }
 
     /** Credentials remain provisional until the final connection and full profile both agree. */
@@ -580,30 +642,33 @@ class WifiController(private val context: Context) {
         ssid: String, bssid: String?, password: String, securityType: String,
         macPolicy: com.quintz.wifi.model.MacAddressPolicy?, mode: WifiTargetMode,
         preserveMode: Boolean, reconnect: Boolean, operationLockHeld: Boolean,
-        automated: Boolean, holdHealthy: Boolean, requestSource: String, correlationId: String
-    ): Boolean = withContext(Dispatchers.IO) {
+        automated: Boolean, holdHealthy: Boolean, requestSource: String, correlationId: String,
+        pinOnly: Boolean = false, actionContext: WifiActionContext? = null
+    ): WifiActionResult = withContext(Dispatchers.IO) {
         val opKind = when (mode) {
             WifiTargetMode.PREFER_5_GHZ -> WifiOperationKind.PREFER_5GHZ
             WifiTargetMode.PIN_BSSID -> WifiOperationKind.LOCK_BSSID
             WifiTargetMode.AUTO -> WifiOperationKind.UNLOCK_ROAM
         }
         if (!operationLockHeld && !WifiOperationCoordinator.tryBegin(opKind)) {
-            lastTransitionResult = TransitionResult.Busy; return@withContext false
+            return@withContext WifiActionResult(TransitionResult.Busy)
         }
         lastPasswordStorageFailure = false
         val backup = ProfileBackupStore(context)
         var result: TransitionResult = TransitionResult.Failed
+        var completion = WifiActionResult(result)
         var transaction: ProfileTransaction<Bundle>? = null
         lastRecoveryFailure = RecoveryFailure.RESTORE_FAILED
         try {
             result = withTimeout(60_000L) {
                 if (!ShizukuManager.isReady()) {
                     if (backup.exists()) { lastRecoveryFailure = RecoveryFailure.ACCESS_UNAVAILABLE; return@withTimeout TransitionResult.RecoveryPending }
-                    return@withTimeout TransitionResult.Unsupported
+                    return@withTimeout TransitionResult.AccessUnavailable
                 }
                 // Resume the durable affected-profile recovery before accepting another request.
                 if (!recoverPendingProfile(backup, operationLockHeld = true)) return@withTimeout TransitionResult.RecoveryPending
                 val initial = refreshStatus(forceFresh = true)
+                if (actionContext != null && !actionContext.matches(initial)) return@withTimeout TransitionResult.NetworkChanged
                 if (automated && (!prefs.isWatchdogEnabled || !wifiEnabled() || initial.isConnected && initial.ssid != ssid))
                     return@withTimeout TransitionResult.Failed
                 val radio = if (bssid != null) scanRadios(correlationId, ssid, bssid)
@@ -618,32 +683,47 @@ class WifiController(private val context: Context) {
                 if (radio != null && !WifiSecurityPolicy.matchesSecurityType(sec, radio.flags)) return@withTimeout TransitionResult.Failed
                 if (initial.isConnected && initial.ssid == ssid && !WifiSecurityPolicy.allowsSameSsidSelection(initial.securityType, sec))
                     return@withTimeout TransitionResult.Failed
-                if (sec in setOf("2", "4") && (password.isEmpty() || !prefs.isPasswordStorageAvailable)) return@withTimeout TransitionResult.StorageFailed
+                if (!pinOnly && sec in setOf("2", "4") && (password.isEmpty() || !prefs.isPasswordStorageAvailable)) return@withTimeout TransitionResult.StorageFailed
                 if (holdHealthy && initial.band == BandType.BAND_2_4_GHZ && initial.rssi in com.quintz.wifi.model.HEALTHY_24G_THRESHOLD_RSSI..-1)
                     return@withTimeout TransitionResult.Failed
                 if (automated && radio != null && radio.rssi < prefs.recoveryThresholdRssi) return@withTimeout TransitionResult.Failed
-                val policy = macPolicy ?: prefs.getMacPolicy(ssid) ?: prefs.defaultMacPolicy
+                var policy = macPolicy ?: prefs.getMacPolicy(ssid) ?: prefs.defaultMacPolicy
                 val identity = ProfileAccess.identity(ssid, sec, initial.networkId.takeIf { initial.ssid == ssid && initial.securityType == sec })
-                val existing = ProfileAccess.call(context, "lookup", identity) ?: return@withTimeout TransitionResult.Unsupported
+                val existing = profiles.call(context, "lookup", identity) ?: return@withTimeout TransitionResult.Unsupported
+                if (pinOnly) {
+                    if (existing.getBoolean("absent")) return@withTimeout TransitionResult.Unsupported
+                    policy = when (existing.getInt("mac", -1)) {
+                        0 -> MacAddressPolicy.DEVICE
+                        1 -> MacAddressPolicy.RANDOMIZED
+                        else -> return@withTimeout TransitionResult.Unsupported
+                    }
+                }
                 val preview = Bundle(if (existing.getBoolean("absent")) identity else existing).apply {
                     putString("newPin", if (bssid != null) bssid else null)
-                    putInt("newMac", if (policy == com.quintz.wifi.model.MacAddressPolicy.DEVICE) 0 else 1)
-                    if (sec in setOf("2", "4")) putString("newPassword", if (password.length == 64 && password.all { it in "0123456789abcdefABCDEF" }) password else "\"$password\"")
+                    if (!pinOnly) putInt("newMac", if (policy == com.quintz.wifi.model.MacAddressPolicy.DEVICE) 0 else 1)
+                    if (pinOnly) putBoolean("macOnly", true)
+                    if (!pinOnly && sec in setOf("2", "4")) putString("newPassword", if (password.length == 64 && password.all { it in "0123456789abcdefABCDEF" }) password else "\"$password\"")
                 }
-                val target = ProfileAccess.call(context, "preview", preview) ?: return@withTimeout TransitionResult.Unsupported
-                val settings = prefs.transitionSettings(ssid, bssid.orEmpty())
+                val target = profiles.call(context, "preview", preview) ?: return@withTimeout TransitionResult.Unsupported
+                val settings = if (pinOnly) prefs.pinTransitionSettings(ssid) else prefs.transitionSettings(ssid, bssid.orEmpty())
                 target.putBundle("appSettings", settings)
                 target.putString("priorActiveSsid", initial.ssid)
+                if (pinOnly) target.putString("operation", "unpin")
                 val backend = transactionBackend(backup, identity, ssid, bssid, sec, policy, password,
                     if (preserveMode) null else mode, !automated, reconnect,
-                    unpinAfter = mode != WifiTargetMode.PIN_BSSID, automated = automated, requestedMode = mode)
+                    unpinAfter = !pinOnly && mode != WifiTargetMode.PIN_BSSID, automated = automated, requestedMode = mode,
+                    pinOnly = pinOnly, actionContext = actionContext)
                 transaction = ProfileTransaction(bundleStore(backup), backend)
-                transaction!!.execute(target)
+                transaction!!.execute(target, selectProfile = reconnect)
             }
             lastPasswordStorageFailure = result == TransitionResult.StorageFailed
         } catch (e: CancellationException) {
             result = TransitionResult.Failed
             if (e !is TimeoutCancellationException) throw e
+        } catch (_: WifiContextChanged) { result = TransitionResult.NetworkChanged
+        } catch (failure: ProfileRecoveryException) {
+            lastRecoveryFailure = failure.reason
+            result = if (backup.exists()) TransitionResult.RecoveryPending else TransitionResult.Unsupported
         } catch (_: Exception) { result = TransitionResult.Failed }
         finally {
             if (result != TransitionResult.Verified && backup.exists()) {
@@ -657,10 +737,11 @@ class WifiController(private val context: Context) {
                 if (!recovered) result = TransitionResult.RecoveryPending
             }
             lastTransitionResult = result
+            completion = WifiActionResult(result, lastRecoveryFailure.takeIf { result == TransitionResult.RecoveryPending })
             DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId source=$requestSource result=${result.javaClass.simpleName}")
             if (!operationLockHeld) WifiOperationCoordinator.end()
         }
-        result == TransitionResult.Verified
+        completion
     }
 
     private fun wifiEnabled(): Boolean = (context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager)?.isWifiEnabled == true
@@ -685,7 +766,7 @@ class WifiController(private val context: Context) {
                                         allowReassignedId: Boolean = false): Bundle? {
         val record = backup.read() ?: return null
         return try {
-            ProfileAccess.callChecked(context, "selectedReadback", Bundle(snapshot).apply {
+            profiles.callChecked(context, "selectedReadback", Bundle(snapshot).apply {
                 val originalExists = record.getBundle("original")?.getBoolean("absent") == false
                 putBoolean("selectionRecorded", record.getBoolean("selectionStarted") && record.getBoolean("selectProfile", true))
                 putBoolean("originalExists", originalExists)
@@ -722,7 +803,7 @@ class WifiController(private val context: Context) {
     private fun connectedToProfile(status: WifiStatus, profile: Bundle): Boolean =
         status.isConnected && status.ssid == profile.getString("ssid")?.removeSurrounding("\"") &&
             status.securityType == profile.getString("security") && status.networkId == profile.getInt("id") &&
-            status.ipAddress.isNotEmpty() && status.ipAddress != "0.0.0.0" &&
+            status.hasIpConfiguration &&
             (profile.getString("pin").isNullOrBlank() || status.bssid.equals(profile.getString("pin"), true)) &&
             !profile.getString("expectedMac").isNullOrBlank() && status.observedMacAddress.equals(profile.getString("expectedMac"), true)
     private fun transactionBackend(
@@ -730,13 +811,20 @@ class WifiController(private val context: Context) {
         policy: com.quintz.wifi.model.MacAddressPolicy, password: String, mode: WifiTargetMode?,
         establishTrust: Boolean, reconnect: Boolean, unpinAfter: Boolean,
         automated: Boolean = false, requestedMode: WifiTargetMode = WifiTargetMode.AUTO,
-        macOnly: Boolean = false
+        macOnly: Boolean = false, pinOnly: Boolean = false, actionContext: WifiActionContext? = null
     ) = object : TransactionBackend<Bundle> {
         private var recovering = false
+        private var hasApplied = false
         override fun beginRecovery() { recovering = true }
         override fun recoveryConflict() { lastRecoveryFailure = RecoveryFailure.PROFILE_CHANGED }
         override fun recoveryRestoreFailed() { lastRecoveryFailure = RecoveryFailure.RESTORE_FAILED }
-        private fun guardForward() {
+        private suspend fun guardForward() {
+            if (!recovering && actionContext != null) {
+                if (!ShizukuManager.isReady()) throw ProfileRecoveryException(RecoveryFailure.ACCESS_UNAVAILABLE)
+                val current = refreshStatus(forceFresh = true)
+                if (!hasApplied && !actionContext.matches(current)) throw WifiContextChanged()
+                if (hasApplied && current.isConnected && current.ssid !in setOf(actionContext.ssid, ssid)) throw WifiContextChanged()
+            }
             if (macOnly && !recovering) {
                 val savedMode = prefs.getWifiTargetMode(ssid)
                 check(savedMode == null || savedMode == requestedMode) { "Steering intent changed during MAC update" }
@@ -756,7 +844,7 @@ class WifiController(private val context: Context) {
         }
         override suspend fun current(): Bundle? {
             val lookup = Bundle(identity).apply { if (recovering) remove("id") }
-            val found = ProfileAccess.callChecked(context, "lookup", lookup).takeUnless { it.getBoolean("absent") }
+            val found = profiles.callChecked(context, "lookup", lookup).takeUnless { it.getBoolean("absent") }
             val record = backup.read()
             if (recovering && found != null && record?.getBundle("original")?.getBoolean("absent") == true && record.getBundle("expected")!!.getInt("id", -1) < 0)
                 throw ProfileRecoveryException(RecoveryFailure.OWNERSHIP_UNKNOWN)
@@ -782,16 +870,18 @@ class WifiController(private val context: Context) {
         override suspend fun apply(snapshot: Bundle): Bundle {
             guardForward()
             val record = backup.read()!!
-            ProfileAccess.callChecked(context, "validate", snapshot)
+            profiles.callChecked(context, "validate", snapshot)
             val original = record.getBundle("original")!!; val expected = record.getBundle("expected")!!
             val now = current()
             check(now == null && original.getBoolean("absent") || now != null && (same(now, original) || same(now, expected) || owns(now)))
-            val updated = ProfileAccess.callChecked(context, "put", Bundle(snapshot).apply {
+            val updated = profiles.callChecked(context, "put", Bundle(snapshot).apply {
                 putByteArray("expected", now?.getByteArray("fingerprint"))
             })
+            hasApplied = true
             if (!recovering) {
                 updated.putBundle("appSettings", expected.getBundle("appSettings"))
                 updated.putString("priorActiveSsid", expected.getString("priorActiveSsid"))
+                if (pinOnly) updated.putString("operation", "unpin")
                 if (macOnly) {
                     updated.putString("operation", "mac_policy")
                     updated.putString("expectedMac", expected.getString("expectedMac"))
@@ -801,7 +891,7 @@ class WifiController(private val context: Context) {
             return updated
         }
         override suspend fun remove(snapshot: Bundle) {
-            ProfileAccess.callChecked(context, "delete", snapshot)
+            profiles.callChecked(context, "delete", snapshot)
         }
         override suspend fun select(snapshot: Bundle) {
             val record = backup.read()!!
@@ -816,7 +906,7 @@ class WifiController(private val context: Context) {
                 guardForward()
                 check(wifiEnabled())
                 if (!recovering) { record.putBoolean("selectionStarted", true); backup.write(record) }
-                ProfileAccess.callChecked(context, "select", snapshot)
+                profiles.callChecked(context, "select", snapshot)
             }
         }
         override suspend fun verifyRecovery(snapshot: Bundle): Boolean {
@@ -838,11 +928,13 @@ class WifiController(private val context: Context) {
         }
         override suspend fun verify(snapshot: Bundle): Boolean {
             guardForward()
-            if (macOnly && !reconnect) return current()?.let { same(it, snapshot) } == true
+            if ((macOnly || pinOnly) && !reconnect) return current()?.let {
+                same(it, snapshot) && (!pinOnly || it.getString("pin").isNullOrBlank())
+            } == true
             var final = refreshStatus(forceFresh = true)
             val deadline = SystemClock.elapsedRealtime() + 12_000L
             var selected: Bundle? = null
-            fun connected() = final.isConnected && final.ssid == ssid && final.securityType == sec && final.ipAddress.isNotEmpty() && final.ipAddress != "0.0.0.0" &&
+            fun connected() = final.isConnected && final.ssid == ssid && final.securityType == sec && final.hasIpConfiguration &&
                 final.networkId == snapshot.getInt("id") && (bssid == null || final.bssid.equals(bssid, true)) &&
                 selected?.let { connectedToProfile(final, it) } == true
             do {
@@ -853,14 +945,14 @@ class WifiController(private val context: Context) {
             if (!connected()) return false
             recordSelectedReadback(backup, snapshot, selected!!)
             if (unpinAfter && !snapshot.getString("pin").isNullOrBlank()) {
-                val unpinned = ProfileAccess.call(context, "preview", Bundle(snapshot).apply { putString("newPin", null); putInt("newMac", snapshot.getInt("mac")) }) ?: return false
+                val unpinned = profiles.call(context, "preview", Bundle(snapshot).apply { putString("newPin", null); putInt("newMac", snapshot.getInt("mac")) }) ?: return false
                 // Journal the new expected state before changing the pin.
                 val record = backup.read()!!
                 @Suppress("DEPRECATION") val owned = record.getParcelableArrayList<Bundle>("owned") ?: arrayListOf()
                 owned.add(Bundle(snapshot)); record.putParcelableArrayList("owned", owned)
                 unpinned.putString("priorActiveSsid", record.getBundle("expected")!!.getString("priorActiveSsid")); unpinned.putBundle("appSettings", record.getBundle("expected")!!.getBundle("appSettings")); record.putBundle("expected", unpinned); backup.write(record)
                 guardForward()
-                if (ProfileAccess.call(context, "put", Bundle(unpinned).apply { putByteArray("expected", snapshot.getByteArray("fingerprint")) }) == null) return false
+                if (profiles.call(context, "put", Bundle(unpinned).apply { putByteArray("expected", snapshot.getByteArray("fingerprint")) }) == null) return false
                 snapshot.putString("pin", null); snapshot.putByteArray("fingerprint", unpinned.getByteArray("fingerprint")); snapshot.putByteArray("payload", unpinned.getByteArray("payload"))
             }
             val inspection = current() ?: return false
@@ -871,6 +963,7 @@ class WifiController(private val context: Context) {
         }
         override suspend fun commit(): Boolean {
             guardForward()
+            if (pinOnly) return prefs.commitUnpin(ssid, mode != null)
             if (macOnly) return prefs.commitMacPolicy(ssid, policy,
                 backup.read()!!.getBundle("expected")!!.getString("expectedMac").takeUnless { reconnect })
             return prefs.commitTransition(ssid, bssid, sec, password, policy, mode, establishTrust)
@@ -878,9 +971,12 @@ class WifiController(private val context: Context) {
         override suspend fun rollbackSettings(): Boolean = prefs.restoreTransitionSettings(backup.read()!!.getBundle("expected")!!.getBundle("appSettings")!!)
             .also { if (!it) lastRecoveryFailure = RecoveryFailure.SETTINGS_FAILED }
     }
-    suspend fun recoverPendingProfile(backup: ProfileBackupStore = ProfileBackupStore(context), operationLockHeld: Boolean = false): Boolean {
-        if (!backup.exists()) return true
-        if (!operationLockHeld && !WifiOperationCoordinator.tryBegin(WifiOperationKind.RECONNECT)) { lastTransitionResult = TransitionResult.Busy; return false }
+    suspend fun recoverPendingProfile(backup: ProfileBackupStore = ProfileBackupStore(context), operationLockHeld: Boolean = false): Boolean =
+        recoverPendingProfileResult(backup, operationLockHeld).verified
+
+    suspend fun recoverPendingProfileResult(backup: ProfileBackupStore = ProfileBackupStore(context), operationLockHeld: Boolean = false): WifiActionResult {
+        if (!backup.exists()) return WifiActionResult(TransitionResult.Verified)
+        if (!operationLockHeld && !WifiOperationCoordinator.tryBegin(WifiOperationKind.RECONNECT)) { return WifiActionResult(TransitionResult.Busy) }
         lastRecoveryFailure = RecoveryFailure.RESTORE_FAILED
         return try {
             val recovered = withTimeoutOrNull(20_000L) {
@@ -894,7 +990,8 @@ class WifiController(private val context: Context) {
                 lastTransitionResult = TransitionResult.RecoveryPending
                 DiagnosticLogger.log("PROFILE_RECOVERY", "result=pending reason=${lastRecoveryFailure.name}")
             } else DiagnosticLogger.log("PROFILE_RECOVERY", "result=verified")
-            recovered == true
+            WifiActionResult(if (recovered == true) TransitionResult.Verified else TransitionResult.RecoveryPending,
+                lastRecoveryFailure.takeIf { recovered != true })
         } finally { if (!operationLockHeld) WifiOperationCoordinator.end() }
     }
     private suspend fun recoverPendingProfileInternal(backup: ProfileBackupStore): Boolean {
@@ -931,39 +1028,45 @@ class WifiController(private val context: Context) {
         }
         val backend = transactionBackend(backup, ProfileAccess.identity(ssid, sec), ssid, null, sec,
             prefs.getMacPolicy(ssid) ?: prefs.defaultMacPolicy, "", null, false, true, true,
-            macOnly = expected.getString("operation") == "mac_policy")
+            macOnly = expected.getString("operation") == "mac_policy", pinOnly = expected.getString("operation") == "unpin")
         return ProfileTransaction(bundleStore(backup), backend).recover()
     }
 
     suspend fun autoSelectAndLock5Ghz(
+        ssid: String, passphrase: String, macAddressPolicy: MacAddressPolicy? = null,
+        approvedBssid: String? = null, requestSource: String = "unspecified",
+        correlationId: String = DiagnosticLogger.newCorrelationId()
+    ): Boolean = autoSelectAndLock5GhzResult(ssid, passphrase, macAddressPolicy, approvedBssid,
+        requestSource, correlationId).verified
+
+    suspend fun autoSelectAndLock5GhzResult(
         ssid: String,
         passphrase: String,
         macAddressPolicy: com.quintz.wifi.model.MacAddressPolicy? = null,
         approvedBssid: String? = null,
         requestSource: String = "unspecified",
-        correlationId: String = DiagnosticLogger.newCorrelationId()
-    ): Boolean {
+        correlationId: String = DiagnosticLogger.newCorrelationId(), actionContext: WifiActionContext? = null
+    ): WifiActionResult {
         if (!WifiOperationCoordinator.tryBegin(WifiOperationKind.PREFER_5GHZ)) {
             DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId result=aborted reason=profile_operation_in_progress")
-            lastTransitionResult = TransitionResult.Busy
-            return false
+            return WifiActionResult(TransitionResult.Busy)
         }
         return try {
             withTimeoutOrNull(60_000L) {
-                autoSelect5GhzInternal(ssid, passphrase, macAddressPolicy, approvedBssid, requestSource, correlationId)
-            } ?: false
+                autoSelect5GhzInternal(ssid, passphrase, macAddressPolicy, approvedBssid, requestSource, correlationId, actionContext)
+            } ?: WifiActionResult(TransitionResult.Failed)
         } finally { WifiOperationCoordinator.end() }
     }
     private suspend fun autoSelect5GhzInternal(
         ssid: String, passphrase: String, macAddressPolicy: com.quintz.wifi.model.MacAddressPolicy?,
-        approvedBssid: String?, requestSource: String, correlationId: String
-    ): Boolean {
+        approvedBssid: String?, requestSource: String, correlationId: String, actionContext: WifiActionContext?
+    ): WifiActionResult {
         lastTransitionResult = TransitionResult.Failed
         lastPasswordStorageFailure = false
         val current = refreshStatus(forceFresh = true)
-        if (!current.isConnected || current.ssid != ssid) {
+        if (!current.isConnected || current.ssid != ssid || actionContext != null && !actionContext.matches(current)) {
             DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId result=aborted reason=active_network_changed")
-            return false
+            return WifiActionResult(TransitionResult.NetworkChanged)
         }
         DiagnosticLogger.log(
             "WIFI_ACTION",
@@ -973,7 +1076,7 @@ class WifiController(private val context: Context) {
         val hasFresh5G = currentRadios.any {
             it.ssid == ssid &&
                     (it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ) &&
-                    it.ageSeconds <= 8L
+                    it.observedAtElapsedMillis > 0L && clock.nowMillis() - it.observedAtElapsedMillis in 0L..8_000L
         }
         if (!hasFresh5G) {
             DiagnosticLogger.log("WIFI", "id=$correlationId source=$requestSource autoSelectAndLock5Ghz: Scanning for fresh 5 GHz candidates...")
@@ -987,7 +1090,7 @@ class WifiController(private val context: Context) {
             .filter {
                 it.ssid == ssid &&
                         (it.band == BandType.BAND_5_GHZ || it.band == BandType.BAND_6_GHZ) &&
-                        it.rssi >= -80 && it.ageSeconds <= 8L &&
+                        it.rssi >= -80 && it.observedAtElapsedMillis > 0L && clock.nowMillis() - it.observedAtElapsedMillis in 0L..8_000L &&
                         (if (approvedBssid != null) {
                             WifiSecurityPolicy.allowsApprovedManualSwitch(
                                 current.securityType, currentFlags, it.flags, approvedBssid, it.bssid
@@ -1003,7 +1106,7 @@ class WifiController(private val context: Context) {
 
         if (best5G == null) {
             DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId result=aborted reason=no_eligible_5ghz_candidate ssid='$ssid' candidateCount=${currentRadios.size}")
-            return false
+            return WifiActionResult(TransitionResult.NoCandidate)
         }
 
         DiagnosticLogger.log(
@@ -1016,7 +1119,7 @@ class WifiController(private val context: Context) {
             latest.securityType != current.securityType
         ) {
             DiagnosticLogger.log("WIFI_ACTION", "id=$correlationId result=aborted reason=active_network_changed_during_scan")
-            return false
+            return WifiActionResult(TransitionResult.NetworkChanged)
         }
         val sec = detectSecurityFromFlags(best5G.flags, current.securityType)
         return lockToBssidInternal(
@@ -1030,7 +1133,7 @@ class WifiController(private val context: Context) {
             allowSwitchFromHealthy24Ghz = false,
             requestSource = requestSource,
             correlationId = correlationId,
-            operationLockHeld = true
+            operationLockHeld = true, actionContext = actionContext ?: WifiActionContext.capture(current)
         )
 
     }

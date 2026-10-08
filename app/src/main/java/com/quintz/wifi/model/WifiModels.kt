@@ -30,6 +30,7 @@ enum class WifiOperationKind {
     LOCK_BSSID,
     UNLOCK_ROAM,
     CHANGE_MAC_POLICY,
+    CHANGE_CREDENTIALS,
     RECONNECT
 }
 
@@ -47,6 +48,8 @@ data class WifiStatus(
     val linkSpeedMbps: Int = 0,
     val standard: String = "",
     val ipAddress: String = "",
+    val ipAddresses: List<String> = emptyList(),
+    val internetValidated: Boolean = false,
     val securityType: String = "",
     val networkId: Int? = null,
     val observedAtMillis: Long = 0L,
@@ -64,6 +67,8 @@ data class WifiStatus(
     val isMacPolicyPending: Boolean = false,
     val observedMacAddress: String? = null
 ) {
+    val hasIpConfiguration: Boolean get() = ipAddresses.isNotEmpty() ||
+        ipAddress.isNotEmpty() && ipAddress !in setOf("0.0.0.0", "::", "::0")
     val isSteeredOrLocked: Boolean
         get() = isPreferenceRequested || isLockedToBssid || requestedPinnedBssid != null || isPreferred5GHz || isPreferred5GHzFallback
 }

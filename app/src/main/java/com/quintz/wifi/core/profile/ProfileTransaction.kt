@@ -29,6 +29,9 @@ sealed interface TransitionResult {
     data object RecoveryPending : TransitionResult
     data object StorageFailed : TransitionResult
     data object Failed : TransitionResult
+    data object NetworkChanged : TransitionResult
+    data object AccessUnavailable : TransitionResult
+    data object NoCandidate : TransitionResult
 }
 class ProfileTransaction<S>(private val store: RecoveryStore<S>, private val backend: TransactionBackend<S>) {
     suspend fun recover(): Boolean {

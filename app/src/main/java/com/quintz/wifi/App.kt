@@ -9,5 +9,6 @@ class App : Application() {
         super.onCreate()
         DiagnosticLogger.initialize(this)
         ShizukuManager.initialize(this)
+        com.quintz.wifi.core.profile.ProfileRecoveryCoordinator.initialize(this)
     }
 }

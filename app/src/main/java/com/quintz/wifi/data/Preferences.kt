@@ -6,10 +6,12 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.quintz.wifi.model.MacAddressPolicy
 import com.quintz.wifi.model.SavedCredentialState
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
 enum class WifiTargetMode { AUTO, PREFER_5_GHZ, PIN_BSSID }
 
-class Preferences private constructor(context: Context) {
+class Preferences private constructor(private val context: Context) {
 
     companion object {
         @Volatile private var instance: Preferences? = null
@@ -20,74 +22,92 @@ class Preferences private constructor(context: Context) {
     }
 
     private val fallbackPrefs = context.getSharedPreferences("prefs", Context.MODE_PRIVATE)
-    private var settingsAvailable = true
-    private var legacyPasswordCleanupSucceeded = true
-    private val securePrefs: SharedPreferences? = try {
-        val masterKey = MasterKey.Builder(context)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
-
-        EncryptedSharedPreferences.create(
-            context,
-            "secure_prefs",
-            masterKey,
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
-    } catch (e: Exception) {
-        null
-    }
-    // Non-secret settings remain usable if Android Keystore is unavailable. Passwords do not.
+    @Volatile private var settingsAvailable = true
+    @Volatile private var legacyPasswordCleanupSucceeded = true
     private val prefs: SharedPreferences = context.getSharedPreferences("settings_v2", Context.MODE_PRIVATE)
+    private val revision = kotlinx.coroutines.flow.MutableStateFlow(0L)
+    val changes: kotlinx.coroutines.flow.StateFlow<Long> = revision.asStateFlow()
+    private val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> changed() }
+    @Volatile private var securePrefs: SharedPreferences? = openSecurePrefs()
+
+    private fun openSecurePrefs(): SharedPreferences? = runCatching {
+        val masterKey = MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()
+        EncryptedSharedPreferences.create(context, "secure_prefs", masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM)
+    }.getOrNull()
+
+    private fun changed() { revision.update { it + 1L } }
 
     init {
-        // Settings have one stable store, independent of credential storage availability.
-        // Preserve conflicting legacy values until the user chooses a source.
+        migrate()
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        securePrefs?.registerOnSharedPreferenceChangeListener(listener)
+    }
+
+    /** Retry the same stores and keys; a transient Keystore failure never deletes encrypted data. */
+    @Synchronized fun retrySecureStorage(): Boolean {
+        if (securePrefs == null) {
+            securePrefs = openSecurePrefs()
+            securePrefs?.registerOnSharedPreferenceChangeListener(listener)
+        }
+        migrate()
+        changed()
+        return isPasswordStorageAvailable
+    }
+
+    private fun migrate() {
         if (!prefs.getBoolean("migration_v2_complete", false)) {
             val secureValues = runCatching { securePrefs?.all.orEmpty() }.getOrDefault(emptyMap())
             val legacy = fallbackPrefs.all
             val editor = prefs.edit()
             (secureValues.keys + legacy.keys).filterNot { it.startsWith("pwd_") }.forEach { key ->
-                if (prefs.contains(key)) return@forEach
-                val a = secureValues[key]; val b = legacy[key]
-                if (a != null && b != null && a != b) {
-                    putValue(editor, "conflict_secure_$key", a)
-                    putValue(editor, "conflict_fallback_$key", b)
-                } else putValue(editor, key, b ?: a)
-            }
-            if (securePrefs != null) editor.putBoolean("migration_v2_complete", true)
-            settingsAvailable = editor.commit()
-            // Only the credential store receives any legacy plaintext credentials.
-            securePrefs?.let { secure ->
-                val credentials = secure.edit()
-                legacy.filterKeys { it.startsWith("pwd_") }.forEach { (key, value) ->
-                    if (!secure.contains(key) && value is String) credentials.putString(key, value)
+                if (!prefs.contains(key)) {
+                    val a = secureValues[key]; val b = legacy[key]
+                    if (a != null && b != null && a != b) {
+                        putValue(editor, "conflict_secure_$key", a)
+                        putValue(editor, "conflict_fallback_$key", b)
+                    } else putValue(editor, key, b ?: a)
                 }
-                credentials.commit()
+            }
+            settingsAvailable = editor.commit()
+            val passwords = legacy.filter { (key, value) -> key.startsWith("pwd_") && value is String }
+            val secure = securePrefs
+            val migrated = if (secure != null) runCatching {
+                val credentials = secure.edit()
+                passwords.forEach { (key, value) -> if (!secure.contains(key)) credentials.putString(key, value as String) }
+                credentials.commit() && passwords.keys.all { !secure.getString(it, null).isNullOrEmpty() }
+            }.getOrDefault(false) else false
+            if (migrated && settingsAvailable) settingsAvailable = prefs.edit().putBoolean("migration_v2_complete", true).commit()
+            if (!migrated && passwords.isNotEmpty()) {
+                val missing = prefs.getStringSet("credential_reentry_ssids", emptySet()).orEmpty() + passwords.keys.map { it.removePrefix("pwd_") }
+                settingsAvailable = prefs.edit().putStringSet("credential_reentry_ssids", missing).commit() && settingsAvailable
             }
         }
-        // If Keystore or migration is unavailable, do not retain an older plaintext copy.
-        // The user can enter the password again once secure storage works.
-        val plaintextPasswordKeys = fallbackPrefs.all.keys.filter { it.startsWith("pwd_") }
-        if (plaintextPasswordKeys.isNotEmpty()) {
+        // Never keep a legacy plaintext password when secure migration is unavailable or fails.
+        val passwordKeys = fallbackPrefs.all.keys.filter { it.startsWith("pwd_") }
+        if (passwordKeys.isNotEmpty()) {
             val cleanup = fallbackPrefs.edit()
-            plaintextPasswordKeys.forEach { cleanup.remove(it) }
-            legacyPasswordCleanupSucceeded = if (cleanup.commit()) true else {
-                // Losing non-secret fallback settings is safer than retaining old plaintext passwords.
-                context.deleteSharedPreferences("prefs")
-            }
+            passwordKeys.forEach { cleanup.remove(it) }
+            legacyPasswordCleanupSucceeded = cleanup.commit() || context.deleteSharedPreferences("prefs")
         }
-        // This legacy setting was never used by the steering control path.
         if (prefs.contains("fallback_threshold")) prefs.edit().remove("fallback_threshold").apply()
-        if (fallbackPrefs !== prefs && fallbackPrefs.contains("fallback_threshold")) {
-            fallbackPrefs.edit().remove("fallback_threshold").apply()
-        }
+        if (fallbackPrefs.contains("fallback_threshold")) fallbackPrefs.edit().remove("fallback_threshold").apply()
     }
+
+    fun needsCredentialReentry(ssid: String): Boolean = ssid in prefs.getStringSet("credential_reentry_ssids", emptySet()).orEmpty()
 
     val isPasswordStorageAvailable: Boolean get() = securePrefs != null && legacyPasswordCleanupSucceeded
 
     fun savePassword(ssid: String, pass: String): Boolean = runCatching {
-        isPasswordStorageAvailable && securePrefs?.edit()?.putString("pwd_$ssid", pass)?.commit() == true
+        val saved = isPasswordStorageAvailable && ssid.isNotEmpty() && pass.isNotEmpty() &&
+            securePrefs?.edit()?.putString("pwd_$ssid", pass)?.commit() == true
+        if (saved) {
+            prefs.edit().putStringSet("credential_reentry_ssids",
+                prefs.getStringSet("credential_reentry_ssids", emptySet()).orEmpty() - ssid).commit()
+            changed()
+        }
+        saved
     }.getOrDefault(false)
 
     fun getPassword(ssid: String): String? = runCatching {
@@ -115,7 +135,7 @@ class Preferences private constructor(context: Context) {
             putValue(editor, key, prefs.all[(if (useFallback) "conflict_fallback_" else "conflict_secure_") + key])
             editor.remove("conflict_secure_$key").remove("conflict_fallback_$key")
         }
-        return editor.commit()
+        return editor.commit().also { settingsAvailable = it; changed() }
     }
 
     private fun putValue(editor: SharedPreferences.Editor, key: String, value: Any?) {
@@ -135,6 +155,15 @@ class Preferences private constructor(context: Context) {
         keys.forEach { key -> putString(key, prefs.getString(key, null)) }
         putString("pwd_$ssid", getPassword(ssid))
     }
+
+    /** Pin-only rollback never reads or rewrites passwords or the MAC preference. */
+    fun pinTransitionSettings(ssid: String): android.os.Bundle = android.os.Bundle().apply {
+        listOf("wifi_target_mode_$ssid", "wifi_pinned_bssid_$ssid").forEach { putString(it, prefs.getString(it, null)) }
+    }
+
+    fun commitUnpin(ssid: String, clearIntent: Boolean): Boolean = !clearIntent || settingsAvailable &&
+        prefs.edit().putString("wifi_target_mode_$ssid", WifiTargetMode.AUTO.name)
+            .remove("wifi_pinned_bssid_$ssid").commit()
 
     fun restoreTransitionSettings(settings: android.os.Bundle): Boolean {
         val editor = prefs.edit()
